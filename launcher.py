@@ -1,28 +1,28 @@
-"""webterm 런처 — 더블클릭 하나로 기동하고 앱 창을 연다.
+"""webterm launcher - start everything and open the app window with one double-click.
 
-    webterm.exe                데몬·웹서버를 확인/기동한 뒤 Chrome 앱 창으로 연다
-    webterm.exe --restart      웹서버만 재시작(세션은 유지)하고 연다
-    webterm.exe --status       현재 상태를 보여준다
-    webterm.exe --stop         웹서버만 정지(세션 유지)
-    webterm.exe --stop-all     데몬까지 정지 ⚠ 열려있는 셸이 전부 종료된다
-    webterm.exe --install      앱으로 설치하기 위해 일반 창으로 연다(타이틀바 제거용)
-    webterm.exe --no-browser   기동만 하고 창은 열지 않는다
+    webterm.exe                check/start the daemon + web server, then open a Chrome app window
+    webterm.exe --restart      restart the web server only (sessions kept) and open
+    webterm.exe --status       show current status
+    webterm.exe --stop         stop the web server only (sessions kept)
+    webterm.exe --stop-all     stop the daemon too  (WARNING: all open shells end)
+    webterm.exe --install      open a normal window to install as an app (removes the title bar)
+    webterm.exe --no-browser   just start, don't open a window
 
-`start.ps1` 과 같은 일을 하지만 콘솔 없는 GUI 앱으로 빌드되므로,
-사람에게 보일 말은 콘솔이 아니라 MessageBox 로 낸다(실패했을 때만 뜬다).
+Does the same as `start.ps1` but is built as a console-less GUI app, so anything meant for a
+human goes to a MessageBox instead of the console (and only appears on failure).
 
-## 이 파일이 지키는 함정 셋 (전부 실제로 밟았던 것)
+## Three pitfalls this file guards against (all hit in practice)
 
-1. **데몬은 콘솔이 있어야 한다.** `pythonw.exe`(콘솔 없음)나 `DETACHED_PROCESS` 로 띄우면
-   ConPTY 생성이 `PanicException: HRESULT(0x00000000)` 로 죽는다.
-   → `python.exe` + `CREATE_NO_WINDOW`(콘솔은 할당, 창은 안 띄움).
-   이 런처 자신은 콘솔이 없어도 된다 — ConPTY 를 만드는 건 데몬이지 런처가 아니고,
-   `CREATE_NO_WINDOW` 는 자식에게 **새 콘솔을 할당**하기 때문이다.
-2. **포트로 프로세스를 찾을 때 `127.0.0.1` 바인딩만 골라야 한다.** `tailscale serve` 가
-   같은 포트를 `100.x`/IPv6 에도 리슨해서, 포트만 보고 첫 리스너를 죽이면 tailscaled 가 죽는다
-   (실제로 죽였다). 여기서는 이미지 이름이 python 계열인지까지 한 번 더 본다.
-3. **환경 오염.** 이 런처를 claude 세션 안에서 실행하면 그 환경이 서버·데몬에 통째로 상속된다
-   → `envclean.clean_env()` 로 걷어내고 넘긴다(`session.py` 와 같은 규칙).
+1. The daemon MUST have a console. Under pythonw.exe (no console) or DETACHED_PROCESS,
+   ConPTY creation dies with PanicException: HRESULT(0x00000000).
+   -> python.exe + CREATE_NO_WINDOW (allocate a console, show no window).
+   This launcher itself needs no console - the daemon creates the ConPTY, not the launcher,
+   and CREATE_NO_WINDOW allocates a NEW console for the child.
+2. When finding a process by port, match ONLY the 127.0.0.1 binding. tailscale serve listens
+   on the same port on 100.x/IPv6, so killing the first listener by port alone kills tailscaled
+   (it happened). Here we also double-check the image name is python-family.
+3. Environment pollution. Running this launcher inside a claude session would leak that
+   environment into the server/daemon -> scrub it with envclean.clean_env() (same rule as session.py).
 """
 import ctypes
 import json
@@ -45,13 +45,13 @@ CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 DETACHED = 0x00000008
 
-# exe 를 프로젝트 밖에 복사해 두는 경우를 위한 탈출구 = `WEBTERM_ROOT` 환경변수.
-# ⚠ 여기에 개인 절대경로를 박지 않는다 — 공개 저장소에 남으면 안 되고,
-#   다른 사람 PC 에서는 어차피 존재하지 않는 경로다.
+# Escape hatch for keeping the exe outside the project = the WEBTERM_ROOT env var.
+# Don't hardcode a personal absolute path here - it mustn't land in a public repo, and it
+# wouldn't exist on anyone else's PC anyway.
 
 
 def app_root():
-    """server.py / daemon.py 가 있는 폴더. exe 는 이 폴더에 두는 것이 기본이다."""
+    """The folder containing server.py / daemon.py. By default the exe sits here."""
     here = (os.path.dirname(os.path.abspath(sys.executable))
             if getattr(sys, "frozen", False)
             else os.path.dirname(os.path.abspath(__file__)))
@@ -64,7 +64,7 @@ def app_root():
 ROOT = app_root()
 
 
-# ── 사람에게 말 걸기 ──────────────────────────────────────────────────────────
+# -- Talking to the human ------------------------------------------------------
 MB_OK, MB_YESNO = 0x0, 0x4
 MB_ICONERROR, MB_ICONINFO, MB_ICONWARN = 0x10, 0x40, 0x30
 IDYES = 6
@@ -78,8 +78,8 @@ def fail(text):
     logline("ERROR " + text.replace("\n", " / "))
     tail = ""
     if ROOT:
-        tail = f"\n\n로그: {os.path.join(ROOT, 'launcher.log')}"
-    box(text + tail, "webterm — 기동 실패", MB_OK | MB_ICONERROR)
+        tail = f"\n\nLog: {os.path.join(ROOT, 'launcher.log')}"
+    box(text + tail, "webterm - startup failed", MB_OK | MB_ICONERROR)
     sys.exit(1)
 
 
@@ -94,7 +94,7 @@ def logline(text):
 
 
 def run(cmd):
-    """콘솔 창을 띄우지 않고 명령을 실행해 표준출력을 돌려준다."""
+    """Run a command without a console window and return its stdout."""
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
                              creationflags=CREATE_NO_WINDOW,
@@ -104,7 +104,7 @@ def run(cmd):
         return ""
 
 
-# ── 포트 · 프로세스 ───────────────────────────────────────────────────────────
+# -- Ports / processes ---------------------------------------------------------
 def is_up(port, timeout=0.4):
     with socket.socket() as s:
         s.settimeout(timeout)
@@ -112,11 +112,11 @@ def is_up(port, timeout=0.4):
 
 
 def listener_pid(port):
-    """127.0.0.1:port 를 LISTENING 중인 우리 프로세스의 PID.
+    """PID of our process LISTENING on 127.0.0.1:port.
 
-    ⚠ 반드시 loopback 바인딩만 고른다 — tailscale serve 가 같은 포트를 100.x / IPv6 에도
-      리슨하고 있어서, 포트만 보면 tailscaled 가 잡힌다(실제로 죽인 적 있다).
-      거기에 더해 이미지 이름이 python 계열인지 확인해 남의 프로세스를 절대 안 건드린다.
+    Match ONLY the loopback binding - tailscale serve listens on the same port on 100.x / IPv6,
+    so by port alone you'd catch tailscaled (killed once). On top of that, verify the image name
+    is python-family so we never touch someone else's process.
     """
     want = f"{HOST}:{port}"
     for line in run(["netstat", "-ano", "-p", "TCP"]).splitlines():
@@ -138,10 +138,10 @@ def kill(pid):
 
 
 def find_python():
-    """콘솔 있는 python.exe 와 콘솔 없는 pythonw.exe 를 찾는다.
+    """Find python.exe (with console) and pythonw.exe (without).
 
-    ⚠ exe 로 얼어붙으면 sys.executable 은 webterm.exe 자신이라 쓸 수 없다.
-    ⚠ PATH 의 WindowsApps\\python.exe 는 Microsoft Store 스텁이라 즉시 죽는다 → 제외.
+    Frozen as an exe, sys.executable is webterm.exe itself, so it's useless.
+    WindowsApps\\python.exe on PATH is a Microsoft Store stub that dies instantly -> excluded.
     """
     cands = []
     env_py = os.environ.get("WEBTERM_PYTHON")
@@ -178,7 +178,7 @@ def find_python():
     return None, None
 
 
-# ── 기동 ─────────────────────────────────────────────────────────────────────
+# -- Startup -------------------------------------------------------------------
 def spawn(exe, script, flags):
     subprocess.Popen(
         [exe, os.path.join(ROOT, script)], cwd=ROOT, close_fds=True,
@@ -199,10 +199,10 @@ def wait_up(port, secs=12.0):
 
 def ensure_daemon(py):
     if is_up(DAEMON_PORT):
-        logline("데몬 이미 실행중 — 유지(세션 보존)")
+        logline("daemon already running - kept (sessions preserved)")
         return True
-    logline("데몬 기동")
-    # ⚠ 콘솔 있는 python.exe + CREATE_NO_WINDOW. pythonw 로 띄우면 ConPTY 가 패닉한다.
+    logline("starting daemon")
+    # python.exe (has a console) + CREATE_NO_WINDOW. Under pythonw, ConPTY panics.
     spawn(py, "daemon.py", CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
     return wait_up(DAEMON_PORT, 10)
 
@@ -210,19 +210,19 @@ def ensure_daemon(py):
 def ensure_server(pyw, restart=False):
     pid = listener_pid(PORT)
     if pid and not restart:
-        logline(f"웹서버 이미 실행중 (PID {pid})")
+        logline(f"web server already running (PID {pid})")
         return True
     if pid:
-        logline(f"웹서버 재시작 — 기존 PID {pid} 종료")
+        logline(f"restarting web server - killing existing PID {pid}")
         kill(pid)
         time.sleep(0.5)
-    logline("웹서버 기동")
-    # 웹서버는 PTY 를 만들지 않으므로 콘솔이 필요 없다 → pythonw(창 없음)
+    logline("starting web server")
+    # The web server creates no PTY, so it needs no console -> pythonw (no window)
     spawn(pyw, "server.py", CREATE_NO_WINDOW)
     return wait_up(PORT, 12)
 
 
-# ── 브라우저 ─────────────────────────────────────────────────────────────────
+# -- Browser -------------------------------------------------------------------
 def find_browser():
     pf, pf86 = os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")
     local = os.environ.get("LOCALAPPDATA", "")
@@ -239,16 +239,16 @@ def find_browser():
 
 
 def pwa_shortcut():
-    """설치된 PWA 의 바로가기(.lnk). 있으면 이걸로 여는 것이 낫다.
+    """The installed PWA's shortcut (.lnk). If present, prefer opening via this.
 
-    설치된 PWA 창에서만 **Window Controls Overlay** 가 켜진다 — 타이틀바가 사라지고
-    창 버튼만 탭바에 얹히는, WezTerm 의 `INTEGRATED_BUTTONS` 와 같은 모양.
-    `--app=URL` 로 띄운 창은 아무리 해도 타이틀바가 남는다.
+    Window Controls Overlay only turns on in an installed PWA window - the title bar disappears
+    and the window buttons sit on the tab bar, same look as WezTerm's INTEGRATED_BUTTONS.
+    A window opened with --app=URL always keeps the title bar.
 
-    Chrome/Edge 는 설치할 때 시작 메뉴 하위 폴더(`Chrome 앱` / `Chrome Apps` / `Edge Apps`)에
-    바로가기를 만든다. app-id 를 캐내는 것보다 그 .lnk 를 실행하는 편이 단순하고 안전하다.
-    ⚠ **하위 폴더만** 뒤진다 — Programs 바로 아래에는 우리가 만든 런처 바로가기가 있어서,
-      그것까지 잡으면 자기 자신을 다시 띄우는 무한 루프가 된다.
+    Chrome/Edge create the shortcut in a Start-menu subfolder on install (`Chrome Apps` / `Edge Apps`).
+    Running that .lnk is simpler and safer than digging out the app-id.
+    Only search SUBFOLDERS - directly under Programs is our own launcher shortcut, and catching that
+    would make an infinite loop of relaunching itself.
     """
     appdata = os.environ.get("APPDATA")
     if not appdata:
@@ -269,10 +269,10 @@ def pwa_shortcut():
 
 
 def open_window():
-    """창을 연다. 설치된 PWA 가 있으면 그쪽(타이틀바 없는 창)을 먼저 쓴다."""
+    """Open a window. If an installed PWA exists, prefer that (title-bar-less window)."""
     lnk = pwa_shortcut()
     if lnk:
-        logline(f"PWA 창으로 열기: {lnk}")
+        logline(f"opening PWA window: {lnk}")
         os.startfile(lnk)
         return
 
@@ -281,7 +281,7 @@ def open_window():
         import webbrowser
         webbrowser.open(URL)
         return
-    logline("앱 모드 창으로 열기(미설치 — 타이틀바가 남는다)")
+    logline("opening app-mode window (not installed - title bar stays)")
     subprocess.Popen(
         [exe, f"--app={URL}", "--window-size=1600,1000"],
         env=clean_env(), close_fds=True,
@@ -290,9 +290,10 @@ def open_window():
 
 
 def cmd_install():
-    """설치용으로 **일반 창**을 연다.
+    """Open a NORMAL window for installing.
 
-    앱 모드 창에는 주소창이 없어 설치 버튼도 없다. 그래서 설치할 때만 보통 창으로 띄운다.
+    App-mode windows have no address bar and thus no install button, so use a normal window
+    only when installing.
     """
     exe = find_browser()
     if not exe:
@@ -301,61 +302,61 @@ def cmd_install():
     else:
         subprocess.Popen([exe, "--new-window", URL], env=clean_env(), close_fds=True,
                          creationflags=CREATE_NO_WINDOW | DETACHED)
-    box("지금 연 창에서 webterm 을 앱으로 설치하세요.\n\n"
-        "  주소창 오른쪽의 설치 아이콘(⊕ 모양)  또는\n"
-        "  ⋮ 메뉴 → 캐스트·저장·공유 → 페이지를 앱으로 설치\n\n"
-        "설치하면 타이틀바가 사라지고 창 버튼이 탭바에 얹힙니다\n"
-        "(WezTerm 의 INTEGRATED_BUTTONS 와 같은 모양).\n\n"
-        "설치 후에는 webterm.exe 가 자동으로 그 창을 엽니다.",
-        "webterm — 앱으로 설치")
+    box("Install webterm as an app from the window that just opened.\n\n"
+        "  the install icon on the right of the address bar  or\n"
+        "  the menu -> Cast, save, and share -> Install page as app\n\n"
+        "Once installed, the title bar disappears and the window buttons\n"
+        "sit on the tab bar (same look as WezTerm's INTEGRATED_BUTTONS).\n\n"
+        "After that, webterm.exe opens that window automatically.",
+        "webterm - install as app")
 
 
-# ── 명령 ─────────────────────────────────────────────────────────────────────
+# -- Commands ------------------------------------------------------------------
 def cmd_status():
     d, w = listener_pid(DAEMON_PORT), listener_pid(PORT)
     lines = [
-        f"세션 데몬 : {'실행중 (PID %d)' % d if d else '정지'}   포트 {DAEMON_PORT}",
-        f"웹서버    : {'실행중 (PID %d)' % w if w else '정지'}   포트 {PORT}",
+        f"session daemon : {'running (PID %d)' % d if d else 'stopped'}   port {DAEMON_PORT}",
+        f"web server     : {'running (PID %d)' % w if w else 'stopped'}   port {PORT}",
     ]
     if d and w:
         try:
             with urllib.request.urlopen(f"{URL}/api/sessions", timeout=5) as r:
                 ss = json.loads(r.read().decode("utf-8")).get("sessions", [])
-            lines.append(f"\n열린 세션 : {len(ss)}개")
-            lines += [f"   · {s.get('name')}  ({s.get('cwd')})" for s in ss]
+            lines.append(f"\nopen sessions : {len(ss)}")
+            lines += [f"   - {s.get('name')}  ({s.get('cwd')})" for s in ss]
         except Exception as e:
-            lines.append(f"\n세션 조회 실패: {e}")
+            lines.append(f"\nsession query failed: {e}")
     lines.append(f"\n{URL}")
-    box("\n".join(lines), "webterm — 상태")
+    box("\n".join(lines), "webterm - status")
 
 
 def cmd_stop(all_=False):
     w = listener_pid(PORT)
     if all_:
         d = listener_pid(DAEMON_PORT)
-        if d and box("세션 데몬까지 종료합니다.\n\n열려있는 셸이 전부 종료됩니다. 계속할까요?",
-                     "webterm — 전체 종료", MB_YESNO | MB_ICONWARN) != IDYES:
+        if d and box("This also stops the session daemon.\n\nAll open shells will end. Continue?",
+                     "webterm - stop all", MB_YESNO | MB_ICONWARN) != IDYES:
             return
         if w:
             kill(w)
         if d:
             kill(d)
-        box("webterm 전체 정지됨" if (w or d) else "이미 정지 상태입니다")
+        box("winterm-web fully stopped" if (w or d) else "already stopped")
         return
     if w:
         kill(w)
-    msg = "웹서버 정지됨"
+    msg = "web server stopped"
     if is_up(DAEMON_PORT):
-        msg += " (세션 데몬은 계속 실행중 — 세션 살아있음)"
+        msg += " (session daemon still running - sessions alive)"
     box(msg)
 
 
 def main():
     args = {a.lower() for a in sys.argv[1:]}
     if not ROOT:
-        fail("webterm 소스를 찾지 못했습니다.\n"
-             "webterm.exe 를 server.py 가 있는 폴더에 두거나,\n"
-             "환경변수 WEBTERM_ROOT 로 경로를 지정하세요.")
+        fail("Could not find the webterm source.\n"
+             "Put webterm.exe in the folder that has server.py,\n"
+             "or set the WEBTERM_ROOT environment variable.")
 
     if "--status" in args:
         return cmd_status()
@@ -372,18 +373,18 @@ def main():
 
     py, pyw = find_python()
     if not py:
-        fail("python 을 찾지 못했습니다.\n"
-             "환경변수 WEBTERM_PYTHON 에 python.exe 경로를 지정할 수 있습니다.")
+        fail("Could not find python.\n"
+             "You can set the WEBTERM_PYTHON environment variable to a python.exe path.")
 
     if not ensure_daemon(py):
-        fail(f"세션 데몬이 뜨지 않았습니다 (포트 {DAEMON_PORT}).\n"
-             f"{os.path.join(ROOT, 'daemon.log')} 를 확인하세요.")
+        fail(f"The session daemon did not come up (port {DAEMON_PORT}).\n"
+             f"Check {os.path.join(ROOT, 'daemon.log')}.")
 
     if not ensure_server(pyw, restart="--restart" in args):
-        fail(f"웹서버가 뜨지 않았습니다 (포트 {PORT}).\n"
-             f"{os.path.join(ROOT, 'webterm.log')} 를 확인하세요.")
+        fail(f"The web server did not come up (port {PORT}).\n"
+             f"Check {os.path.join(ROOT, 'webterm.log')}.")
 
-    logline(f"준비 완료 → {URL}")
+    logline(f"ready -> {URL}")
     if "--no-browser" not in args:
         open_window()
 
@@ -396,5 +397,5 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         logline("UNCAUGHT " + traceback.format_exc().replace("\n", " / "))
-        box(f"예상치 못한 오류:\n\n{e}", "webterm", MB_OK | MB_ICONERROR)
+        box(f"Unexpected error:\n\n{e}", "webterm", MB_OK | MB_ICONERROR)
         sys.exit(1)
