@@ -1,0 +1,145 @@
+﻿<#
+  winterm-web 설치 스크립트
+
+  install.bat 이 이 파일을 ExecutionPolicy Bypass 로 부른다.
+  .bat 을 경유하는 이유: 새 Windows 의 기본 정책(Restricted)에서는 .ps1 을 직접 못 돌린다.
+  그게 첫 실행 실패의 1순위라, 사용자가 정책을 건드리지 않아도 되게 만든다.
+
+  하는 일
+    1) 파이썬 확인 → 없으면 winget 으로 3.12 설치 (PATH 갱신 없이 직접 찾아 쓴다)
+    2) 의존성 설치 (python -m pip)
+    3) 자동시작 등록 여부를 묻는다 (기본 아니오)
+    4) 서버 기동 + 브라우저 열기
+
+  옵션
+    -Autostart     묻지 않고 자동시작 등록
+    -NoAutostart   묻지 않고 건너뜀
+    -NoStart       설치만 하고 기동하지 않음
+#>
+param([switch]$Autostart, [switch]$NoAutostart, [switch]$NoStart)
+
+$ErrorActionPreference = "Stop"
+$ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+Set-Location $ROOT
+
+function Say($msg, $color = "Gray") { Write-Host $msg -ForegroundColor $color }
+function Step($n, $msg) { Write-Host ""; Write-Host "[$n] $msg" -ForegroundColor Cyan }
+function Die($msg) { Write-Host ""; Write-Host "X $msg" -ForegroundColor Red; exit 1 }
+
+Write-Host ""
+Write-Host "  winterm-web 설치" -ForegroundColor White
+Write-Host "  $ROOT" -ForegroundColor DarkGray
+
+# ── 1. 파이썬 ────────────────────────────────────────────────────────────────
+Step 1 "파이썬 확인"
+
+function Find-Python {
+    # PATH 의 WindowsApps\python.exe 는 Microsoft Store 스텁이라 실행하면 스토어만 열린다
+    $c = Get-Command python -All -ErrorAction SilentlyContinue |
+         Where-Object { $_.Source -and $_.Source -notlike "*WindowsApps*" } |
+         Select-Object -First 1
+    if ($c) { return $c.Source }
+    # winget 으로 방금 설치한 경우 PATH 가 아직 이 세션에 없다 → 설치 위치를 직접 뒤진다
+    foreach ($base in "$env:LOCALAPPDATA\Programs\Python", "$env:ProgramFiles\Python") {
+        if (Test-Path $base) {
+            $p = Get-ChildItem $base -Filter "Python3*" -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending |
+                 ForEach-Object { Join-Path $_.FullName "python.exe" } |
+                 Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($p) { return $p }
+        }
+    }
+    return $null
+}
+
+$py = Find-Python
+if ($py) {
+    $ver = & $py --version 2>&1
+    Say "  찾음: $py  ($ver)" "Green"
+} else {
+    Say "  파이썬이 없다. winget 으로 3.12 를 설치한다." "Yellow"
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Die "winget 이 없어 자동 설치를 못 한다. https://www.python.org/downloads/windows/ 에서 3.12 를 설치하고 다시 실행해라 (설치 시 'Add to PATH' 체크)."
+    }
+    winget install --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
+    $py = Find-Python
+    if (-not $py) {
+        winget install --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
+        $py = Find-Python
+    }
+    if (-not $py) { Die "설치는 됐는데 python.exe 를 못 찾겠다. PowerShell 을 새로 열고 다시 실행해라." }
+    Say "  설치 완료: $py" "Green"
+}
+
+# ── 2. 의존성 ────────────────────────────────────────────────────────────────
+Step 2 "의존성 설치 (1~3분 걸릴 수 있다)"
+& $py -m pip install --disable-pip-version-check -q -r (Join-Path $ROOT "requirements.txt")
+if ($LASTEXITCODE -ne 0) { Die "pip 설치 실패. 사내 프록시 환경이면 --proxy 옵션이 필요하다 (README 참조)." }
+Say "  완료" "Green"
+
+# ── 3. 자동시작 ──────────────────────────────────────────────────────────────
+Step 3 "자동시작 등록"
+$TASK = "WebtermServer"
+$want = $false
+if ($Autostart) { $want = $true }
+elseif ($NoAutostart) { $want = $false }
+else {
+    Write-Host "  로그온할 때 자동으로 띄울까?" -ForegroundColor White
+    Write-Host "  (인증이 없는 셸 서버라, 자주 안 쓸 거면 아니오를 권한다)" -ForegroundColor DarkGray
+    $want = (Read-Host "  등록? [y/N]") -match "^(y|Y)"
+}
+
+if ($want) {
+    $exe = Join-Path $ROOT "webterm.exe"
+    if (Test-Path $exe) {
+        $action = New-ScheduledTaskAction -Execute $exe -Argument "--no-browser" -WorkingDirectory $ROOT
+    } else {
+        # exe 를 아직 안 만들었으면 start.ps1 을 창 없이 돌린다
+        $ps1 = Join-Path $ROOT "start.ps1"
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+                  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`"" `
+                  -WorkingDirectory $ROOT
+    }
+    # 로그온 직후는 네트워크·디스크가 바빠 바로 띄우면 실패하기 쉽다 → 30초 지연
+    $trig = New-ScheduledTaskTrigger -AtLogOn
+    $trig.Delay = "PT30S"
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+           -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew
+    Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $TASK -Action $action -Trigger $trig -Settings $set `
+        -Description "winterm-web 자동 기동 (로그온 30초 후, 창 없이)" | Out-Null
+    Say "  등록 완료 — 해제하려면 uninstall.bat" "Green"
+} else {
+    Say "  건너뜀 (나중에 원하면 install.bat -Autostart)" "DarkGray"
+}
+
+# ── 4. 기동 ──────────────────────────────────────────────────────────────────
+if ($NoStart) {
+    Step 4 "기동 생략 (-NoStart)"
+    Write-Host ""; Say "설치 끝. 실행하려면 start.ps1" "Green"
+    exit 0
+}
+
+Step 4 "기동"
+$port = if ($env:WEBTERM_PORT) { $env:WEBTERM_PORT } else { "8767" }
+& (Join-Path $ROOT "start.ps1")
+
+$url = "http://127.0.0.1:$port"
+$ok = $false
+foreach ($i in 1..15) {
+    Start-Sleep -Milliseconds 700
+    try { if ((Invoke-RestMethod "$url/api/health" -TimeoutSec 3).ok) { $ok = $true; break } } catch {}
+}
+
+Write-Host ""
+if ($ok) {
+    Say "  설치 완료 → $url" "Green"
+    Start-Process $url
+    Write-Host ""
+    Write-Host "  주의: 인증이 없다. 127.0.0.1 로만 쓰고 WEBTERM_HOST 는 건드리지 마라." -ForegroundColor Yellow
+    Write-Host "  외부에서 쓰려면 Tailscale 같은 사설망 위에서만 열어야 한다." -ForegroundColor Yellow
+} else {
+    Say "  기동 확인 실패. webterm.log 를 봐라:" "Red"
+    Write-Host "    Get-Content `"$ROOT\webterm.log`" -Tail 30"
+    exit 1
+}

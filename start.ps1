@@ -12,8 +12,10 @@ param([switch]$fg, [switch]$Stop, [switch]$StopAll, [switch]$Status)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$port = 8767
-$daemonPort = 8771
+# ⚠ 환경변수를 존중해야 한다 — server.py·launcher.py 는 이미 그렇게 동작하는데
+#   여기만 하드코딩이라 "포트 충돌 시 WEBTERM_PORT 로 바꿔라"는 안내가 거짓이었다.
+$port = if ($env:WEBTERM_PORT) { [int]$env:WEBTERM_PORT } else { 8767 }
+$daemonPort = if ($env:WEBTERM_DAEMON_PORT) { [int]$env:WEBTERM_DAEMON_PORT } else { 8771 }
 
 function Get-Listener($p) {
     # ⚠ 반드시 127.0.0.1 바인딩만 고른다.
@@ -86,6 +88,8 @@ if (-not (Get-Listener $daemonPort)) {
     Write-Host "세션 데몬 기동중..."
     # ⚠ daemon.py 를 pythonw 로 직접 띄우면 안 된다 — 콘솔이 없어 ConPTY 생성이 패닉한다.
     #   spawn_daemon.py 가 python.exe + CREATE_NO_WINDOW 로 다시 띄워준다(콘솔 O, 창 X).
+    # 자식(데몬)도 같은 포트를 써야 한다
+    $env:WEBTERM_DAEMON_PORT = "$daemonPort"
     Start-Process -FilePath $pyw -ArgumentList "spawn_daemon.py" -WorkingDirectory $root -WindowStyle Hidden
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Milliseconds 400
