@@ -1,27 +1,27 @@
-# ── 로그 (세션 이름·경로 이력이 남는다. 절대 커밋하지 않는다) ──
+# -- Logs (session names / path history end up here; never commit) --
 *.log
 
-# ── 빌드 산출물 ──
+# -- Build artifacts --
 build/
 dist/
 __pycache__/
 *.pyc
 webterm.exe
 
-# ── 작업 중 백업 ──
+# -- Work-in-progress backups --
 _backup/
 
-# ── xterm.js 실험 버전 (실제로 쓰는 것은 static/vendor/ 하나뿐) ──
+# -- Experimental xterm.js versions (only static/vendor/ is actually used) --
 static/vendor-*/
 
-# ── 사용자 설정 (기본값은 config.default.json, 사용자 값은 커밋 대상이 아니다) ──
+# -- User settings (defaults live in config.default.json; user values aren't committed) --
 config.json
 
-# ── 문서·스크린샷은 올리지 않는다 ──
-# 스크린샷에 고객사 내부 정보(IP·도메인·보안 구조)가 찍혀 있던 사고가 있었다(2026-09-11).
-# 개발 기록과 교과서도 실행에 불필요하고 전수 검토 전이라 추적하지 않는다.
-# 로컬에는 그대로 남는다 — 올리려면 내용을 한 장/한 줄씩 확인한 뒤 화이트리스트로 풀 것.
+# -- Docs and screenshots are not published --
+# A screenshot once carried internal client info (IPs, domains, security structure) (2026-09-11).
+# Dev notes and the textbook aren't needed to run it and aren't fully reviewed, so they're untracked.
+# They stay locally - to publish, review each image/line and un-ignore explicitly.
 docs/
 
-# 개발용 테스트 페이지 (실행에 불필요)
+# Dev test page (not needed to run it)
 static/scrolltest.html

@@ -2,7 +2,7 @@
   "id": "/",
   "name": "webterm",
   "short_name": "webterm",
-  "description": "PTY 직결 웹 터미널",
+  "description": "A direct-PTY web terminal",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
