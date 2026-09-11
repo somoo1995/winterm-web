@@ -16,7 +16,7 @@
     -NoAutostart   묻지 않고 건너뜀
     -NoStart       설치만 하고 기동하지 않음
 #>
-param([switch]$Autostart, [switch]$NoAutostart, [switch]$NoStart)
+param([switch]$Autostart, [switch]$NoAutostart, [switch]$NoStart, [switch]$NoBrowser, [switch]$NoShortcut)
 
 $ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -105,12 +105,44 @@ if ($want) {
     $trig.Delay = "PT30S"
     $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
            -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew
-    Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
+    # 같은 이름의 작업이 다른 설치본을 가리키면 조용히 뺏지 않고 알려준다
+    $prev = Get-ScheduledTask -TaskName $TASK -ErrorAction SilentlyContinue
+    if ($prev) {
+        $where = @($prev.Actions | ForEach-Object { "$($_.Execute) $($_.WorkingDirectory)" })
+        if (-not ($where | Where-Object { $_ -like "*$ROOT*" })) {
+            Say "  주의: 기존 WebtermServer 작업이 다른 폴더를 가리키고 있다 — 덮어쓴다:" "Yellow"
+            $where | ForEach-Object { Say "    $_" "DarkGray" }
+        }
+        Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
+    }
     Register-ScheduledTask -TaskName $TASK -Action $action -Trigger $trig -Settings $set `
         -Description "winterm-web 자동 기동 (로그온 30초 후, 창 없이)" | Out-Null
     Say "  등록 완료 — 해제하려면 uninstall.bat" "Green"
 } else {
     Say "  건너뜀 (나중에 원하면 install.bat -Autostart)" "DarkGray"
+}
+
+# ── 3.5 바로가기 ─────────────────────────────────────────────────────────────
+# 자동시작을 안 걸면 여는 방법이 없어진다. 바탕화면에 하나 둔다.
+# 서버가 꺼져 있어도 되게 start.ps1 을 먼저 돌리고 브라우저를 연다.
+if (-not $NoShortcut) {
+    Step "3.5" "바탕화면 바로가기"
+    try {
+        $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "winterm-web.lnk"
+        $open = Join-Path $ROOT "tools\open.ps1"
+        $ws = New-Object -ComObject WScript.Shell
+        $sc = $ws.CreateShortcut($lnk)
+        $sc.TargetPath = "powershell.exe"
+        $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$open`""
+        $sc.WorkingDirectory = $ROOT
+        $ico = Join-Path $ROOT "assets\webterm.ico"
+        if (Test-Path $ico) { $sc.IconLocation = $ico }
+        $sc.Description = "winterm-web 열기"
+        $sc.Save()
+        Say "  바탕화면에 winterm-web 바로가기 생성" "Green"
+    } catch {
+        Say "  바로가기 생성 실패(무시 가능): $($_.Exception.Message)" "DarkGray"
+    }
 }
 
 # ── 4. 기동 ──────────────────────────────────────────────────────────────────
@@ -134,7 +166,7 @@ foreach ($i in 1..15) {
 Write-Host ""
 if ($ok) {
     Say "  설치 완료 → $url" "Green"
-    Start-Process $url
+    if (-not $NoBrowser) { Start-Process $url }
     Write-Host ""
     Write-Host "  주의: 인증이 없다. 127.0.0.1 로만 쓰고 WEBTERM_HOST 는 건드리지 마라." -ForegroundColor Yellow
     Write-Host "  외부에서 쓰려면 Tailscale 같은 사설망 위에서만 열어야 한다." -ForegroundColor Yellow
