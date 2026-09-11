@@ -73,8 +73,14 @@ if ($py) {
 
 # ── 2. 의존성 ────────────────────────────────────────────────────────────────
 Step 2 "의존성 설치 (1~3분 걸릴 수 있다)"
+# ⚠ pip 는 requirements.txt 를 UTF-8 이 아니라 **로케일 인코딩**(한국어 Windows=cp949)으로
+#   읽는다. 파일에 비ASCII 가 있으면 UnicodeDecodeError 로 죽는다(실측 2026-09-11, 한국어 노트북).
+#   requirements.txt 는 ASCII 로 유지하되, 안전망으로 UTF-8 모드도 켜둔다.
+$env:PYTHONUTF8 = "1"
 & $py -m pip install --disable-pip-version-check -q -r (Join-Path $ROOT "requirements.txt")
-if ($LASTEXITCODE -ne 0) { Die "pip 설치 실패. 사내 프록시 환경이면 --proxy 옵션이 필요하다 (README 참조)." }
+if ($LASTEXITCODE -ne 0) {
+    Die "pip 설치 실패. 사내 프록시 환경이면 프록시 설정이 필요할 수 있다 (README '설치가 막힐 때' 참조)."
+}
 Say "  완료" "Green"
 
 # ── 3. 자동시작 ──────────────────────────────────────────────────────────────

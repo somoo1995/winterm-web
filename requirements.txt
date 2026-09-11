@@ -1,12 +1,13 @@
-# webterm 런타임 의존성
+# winterm-web runtime dependencies (keep this file ASCII-only:
+# pip reads requirements.txt with the locale encoding, not UTF-8).
 #
-# ⚠ anyio 는 4.9 이상이어야 한다. 4.6.2 + starlette 1.0 조합은 async 라우트의 body 파싱에서
-#   `MemoryObjectItemReceiver` AttributeError 로 죽는다 (docs/DEVLOG.md 함정 #3).
+# anyio must be >= 4.9. 4.6.2 + starlette 1.0 crashes in async route body
+# parsing (MemoryObjectItemReceiver AttributeError). See docs/DEVLOG.md.
 fastapi>=0.115
 uvicorn>=0.30
 websockets>=13
 anyio>=4.9
 python-multipart>=0.0.9
 
-# Windows 전용 — ConPTY 바인딩. 이 프로젝트가 Windows 전용인 이유가 이것이다.
+# Windows only - the ConPTY binding. This is why the project is Windows-only.
 pywinpty>=2.0 ; sys_platform == "win32"
