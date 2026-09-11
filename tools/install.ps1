@@ -90,34 +90,67 @@ else {
 }
 
 if ($want) {
-    $exe = Join-Path $ROOT "webterm.exe"
-    if (Test-Path $exe) {
-        $action = New-ScheduledTaskAction -Execute $exe -Argument "--no-browser" -WorkingDirectory $ROOT
-    } else {
-        # exe 를 아직 안 만들었으면 start.ps1 을 창 없이 돌린다
-        $ps1 = Join-Path $ROOT "start.ps1"
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-                  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`"" `
-                  -WorkingDirectory $ROOT
-    }
-    # 로그온 직후는 네트워크·디스크가 바빠 바로 띄우면 실패하기 쉽다 → 30초 지연
-    $trig = New-ScheduledTaskTrigger -AtLogOn
-    $trig.Delay = "PT30S"
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-           -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew
-    # 같은 이름의 작업이 다른 설치본을 가리키면 조용히 뺏지 않고 알려준다
-    $prev = Get-ScheduledTask -TaskName $TASK -ErrorAction SilentlyContinue
-    if ($prev) {
-        $where = @($prev.Actions | ForEach-Object { "$($_.Execute) $($_.WorkingDirectory)" })
-        if (-not ($where | Where-Object { $_ -like "*$ROOT*" })) {
-            Say "  주의: 기존 WebtermServer 작업이 다른 폴더를 가리키고 있다 — 덮어쓴다:" "Yellow"
-            $where | ForEach-Object { Say "    $_" "DarkGray" }
+    # ⚠ 자동시작은 부가 기능이다. 여기서 실패해도 설치 전체가 죽으면 안 된다.
+    #   (실측 2026-09-11: Register-ScheduledTask 가 Access denied 로 터지면서
+    #    $ErrorActionPreference="Stop" 때문에 설치가 통째로 중단됐다)
+    $done = $false
+
+    # ① 예약작업 — 지연·창숨김을 OS 가 해주므로 가능하면 이쪽. 단 보통 관리자 권한이 필요하다.
+    try {
+        $exe = Join-Path $ROOT "webterm.exe"
+        if (Test-Path $exe) {
+            $action = New-ScheduledTaskAction -Execute $exe -Argument "--no-browser" -WorkingDirectory $ROOT
+        } else {
+            $ps1 = Join-Path $ROOT "start.ps1"
+            $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+                      -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`"" `
+                      -WorkingDirectory $ROOT
         }
-        Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
+        $trig = New-ScheduledTaskTrigger -AtLogOn
+        $trig.Delay = "PT30S"
+        $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+               -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew
+
+        $prev = Get-ScheduledTask -TaskName $TASK -ErrorAction SilentlyContinue
+        if ($prev) {
+            $where = @($prev.Actions | ForEach-Object { "$($_.Execute) $($_.WorkingDirectory)" })
+            if (-not ($where | Where-Object { $_ -like "*$ROOT*" })) {
+                Say "  주의: 기존 $TASK 작업이 다른 폴더를 가리킨다 — 덮어쓴다" "Yellow"
+                $where | ForEach-Object { Say "    $_" "DarkGray" }
+            }
+            Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Register-ScheduledTask -TaskName $TASK -Action $action -Trigger $trig -Settings $set `
+            -Description "winterm-web 자동 기동 (로그온 30초 후, 창 없이)" -ErrorAction Stop | Out-Null
+        Say "  예약작업 등록 완료 (로그온 30초 후)" "Green"
+        $done = $true
+    } catch {
+        Say "  예약작업 등록 불가 ($($_.Exception.Message.Trim())) — 시작프로그램 방식으로 전환" "DarkYellow"
     }
-    Register-ScheduledTask -TaskName $TASK -Action $action -Trigger $trig -Settings $set `
-        -Description "winterm-web 자동 기동 (로그온 30초 후, 창 없이)" | Out-Null
-    Say "  등록 완료 — 해제하려면 uninstall.bat" "Green"
+
+    # ② 시작프로그램 폴더 — 관리자 권한이 필요 없다. 지연은 autostart.ps1 이 직접 준다.
+    if (-not $done) {
+        try {
+            $startup = [Environment]::GetFolderPath("Startup")
+            $lnk = Join-Path $startup "winterm-web.lnk"
+            $auto = Join-Path $ROOT "toolsutostart.ps1"
+            $ws = New-Object -ComObject WScript.Shell
+            $sc = $ws.CreateShortcut($lnk)
+            $sc.TargetPath = "powershell.exe"
+            $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$auto`""
+            $sc.WorkingDirectory = $ROOT
+            $ico = Join-Path $ROOT "assets\webterm.ico"
+            if (Test-Path $ico) { $sc.IconLocation = $ico }
+            $sc.Description = "winterm-web 자동 기동"
+            $sc.Save()
+            Say "  시작프로그램에 등록 완료 (관리자 권한 불필요)" "Green"
+            Say "    $lnk" "DarkGray"
+            $done = $true
+        } catch {
+            Say "  자동시작 등록 실패: $($_.Exception.Message)" "Red"
+            Say "  설치는 계속한다. 나중에 install.bat -Autostart 로 다시 시도할 수 있다." "DarkGray"
+        }
+    }
 } else {
     Say "  건너뜀 (나중에 원하면 install.bat -Autostart)" "DarkGray"
 }

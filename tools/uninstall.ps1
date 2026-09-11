@@ -44,6 +44,23 @@ if (-not $t) {
     }
 }
 
+# 1.2 시작프로그램 폴더 자동시작 제거 (예약작업 등록이 막힌 환경의 폴백 경로)
+Write-Host ""
+Write-Host "[1.2] 시작프로그램 자동시작" -ForegroundColor Cyan
+$sl = Join-Path ([Environment]::GetFolderPath("Startup")) "winterm-web.lnk"
+if (Test-Path $sl) {
+    $args0 = ""
+    try { $args0 = (New-Object -ComObject WScript.Shell).CreateShortcut($sl).Arguments } catch {}
+    if ($args0 -like "*$ROOT*") {
+        Remove-Item $sl -Force
+        Write-Host "  제거 완료" -ForegroundColor Green
+    } else {
+        Write-Host "  건너뜀 — 다른 설치본을 가리킨다" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  없다" -ForegroundColor DarkGray
+}
+
 # 1.5 바로가기 제거 — 이 설치본을 가리키는 것만
 Write-Host ""
 Write-Host "[1.5] 바탕화면 바로가기" -ForegroundColor Cyan
