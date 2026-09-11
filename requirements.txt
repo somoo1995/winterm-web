@@ -1,0 +1,12 @@
+# webterm 런타임 의존성
+#
+# ⚠ anyio 는 4.9 이상이어야 한다. 4.6.2 + starlette 1.0 조합은 async 라우트의 body 파싱에서
+#   `MemoryObjectItemReceiver` AttributeError 로 죽는다 (docs/DEVLOG.md 함정 #3).
+fastapi>=0.115
+uvicorn>=0.30
+websockets>=13
+anyio>=4.9
+python-multipart>=0.0.9
+
+# Windows 전용 — ConPTY 바인딩. 이 프로젝트가 Windows 전용인 이유가 이것이다.
+pywinpty>=2.0 ; sys_platform == "win32"

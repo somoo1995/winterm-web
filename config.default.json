@@ -1,0 +1,75 @@
+{
+  "_readme": [
+    "이 파일은 기본값이다. 고치지 말고, 같은 폴더에 config.json 을 만들어 바꿀 항목만 적는다.",
+    "config.json 은 .gitignore 되어 있고, 여기 값 위에 덮어씌워진다(keymap 은 키 단위로 병합).",
+    "적용은 웹서버 재시작(start.ps1) 후 브라우저 새로고침."
+  ],
+  "defaultCwd": "",
+  "shell": "",
+  "fontSize": 14.7,
+  "security": {
+    "_readme": [
+      "접근 통제 자체는 네트워크(사설망/Tailscale)에 맡긴다. 여기 있는 것은 그것으로 막을 수 없는",
+      "'사용자 브라우저에서 오는 공격'만 차단하는 자물쇠다 — DNS 리바인딩과 교차출처 WebSocket.",
+      "allowedHosts: 허용할 Host 헤더. '*.' 로 시작하면 와일드카드(서브도메인)다.",
+      "  *.ts.net 은 Tailscale MagicDNS 용 — 공격자가 그 아래 이름을 가질 수 없어 안전하다.",
+      "allowedOrigins: WebSocket 의 Origin 허용 목록. 비워두면 allowedHosts 와 같은 규칙을 쓴다.",
+      "  Origin 이 없는 요청(curl·스크립트)은 통과시킨다 — 브라우저만 Origin 을 붙이기 때문."
+    ],
+    "enabled": true,
+    "allowedHosts": [
+      "127.0.0.1",
+      "localhost",
+      "[::1]",
+      "*.ts.net"
+    ],
+    "allowedOrigins": []
+  },
+  "keymap": {
+    "_readme": [
+      "형식: \"조합\": \"액션\". 조합은 Ctrl → Alt → Shift 순서로 쓰고 키는 소문자다.",
+      "  예) \"Ctrl+]\"   \"Alt+arrowleft\"   \"Ctrl+Shift+r\"",
+      "액션 뒤의 :숫자 는 인자다. 전체 목록은 브라우저 콘솔에서 webterm.actions() 로 볼 수 있다.",
+      "값을 \"\" 로 두면 그 조합을 앱이 가로채지 않고 터미널로 흘려보낸다.",
+      "⚠ 브라우저가 먼저 먹어 앱이 잡을 수 없는 조합이 있다: Ctrl+W, Ctrl+Shift+W, Ctrl+Shift+T.",
+      "  그래서 패널 닫기가 Alt+X 다.",
+      "⚠ Ctrl+W(단어 지우기)·Ctrl+R(역방향 검색)은 일부러 비워뒀다 — PSReadLine 이 실제로 쓴다."
+    ],
+    "Ctrl+]": "pane.split.h",
+    "Ctrl+\\": "pane.split.v",
+    "Ctrl+n": "tab.new",
+    "Ctrl+t": "tab.rename",
+    "Ctrl+p": "pane.rename",
+    "Ctrl+arrowleft": "tab.prev",
+    "Ctrl+arrowright": "tab.next",
+    "Ctrl+1": "tab.select:1",
+    "Ctrl+2": "tab.select:2",
+    "Ctrl+3": "tab.select:3",
+    "Ctrl+4": "tab.select:4",
+    "Ctrl+5": "tab.select:5",
+    "Ctrl+6": "tab.select:6",
+    "Ctrl+7": "tab.select:7",
+    "Ctrl+8": "tab.select:8",
+    "Ctrl+9": "tab.select:9",
+    "Alt+1": "pane.zoom:1",
+    "Alt+2": "pane.zoom:2",
+    "Alt+3": "pane.zoom:3",
+    "Alt+4": "pane.zoom:4",
+    "Alt+5": "pane.zoom:5",
+    "Alt+6": "pane.zoom:6",
+    "Alt+7": "pane.zoom:7",
+    "Alt+8": "pane.zoom:8",
+    "Alt+9": "pane.zoom:9",
+    "Alt+0": "pane.unzoom",
+    "Alt+arrowleft": "pane.prev",
+    "Alt+arrowright": "pane.next",
+    "Alt+x": "pane.close",
+    "Alt+b": "rail.toggle",
+    "Alt+r": "view.refit",
+    "Ctrl+Shift+r": "view.refit",
+    "Ctrl+=": "font.inc",
+    "Ctrl++": "font.inc",
+    "Ctrl+-": "font.dec",
+    "Ctrl+0": "font.reset"
+  }
+}

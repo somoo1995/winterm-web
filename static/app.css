@@ -1,0 +1,577 @@
+/* webterm — .wezterm.lua 를 그대로 옮긴 외형
+   색·화살표·패딩 모두 WezTerm 설정과 같은 값(format-tab-title / update-status 참조) */
+:root{
+  --bg:#1a1b26;          /* config.colors.background & tab_bar.background */
+  --tab-off-bg:#24283b;  /* 비활성 탭 */
+  --tab-off-fg:#565f89;
+  --tab-hover-bg:#3b4261;
+  --tab-on-bg:#7aa2f7;   /* 활성 탭 = Tokyo Night 블루 */
+  --tab-on-fg:#1a1b26;
+  --fg:#c0caf5;
+  --dim:#565f89;
+  --line:#292e42;
+  --green:#9ece6a; --red:#f7768e; --orange:#ff9e64; --purple:#bb9af7;
+  --tabbar-h:32px;
+  --arrow:16px;          /* Powerline 화살표 폭(탭 높이의 절반) */
+  --rail-w:190px;        /* 세로 세션 레일 폭 */
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}   /* ⚠ 아래 display:flex 가 hidden 을 덮지 않도록 */
+/* ⭐ `none` — 페이지 자체가 조금도 스크롤되지 않게 한다.
+   ⚠ 폰 주소창은 **페이지 스크롤에 반응해 접혔다 펴지고**, 그때마다 보이는 높이가 96px(≈4줄)씩
+     변한다. 그 값이 그대로 PTY 크기로 나가면 **타이핑 도중에 화면이 다시 그려져** 입력창이
+     겹쳐 보인다(2026-08-24: `/r/r/r//c` 처럼 프롬프트가 여러 겹으로 찍힌 화면).
+     `contain` 은 자식의 스크롤 전파만 막을 뿐 페이지 자체 스크롤은 남는다 → `none` 이어야 한다. */
+html,body{height:100%;margin:0;overscroll-behavior:none}
+body{
+  display:flex; flex-direction:column;
+  background:var(--bg); color:var(--fg);
+  font:12.5px/1.4 "JetBrains Mono","Consolas",ui-monospace,monospace;
+  overflow:hidden; user-select:none;
+}
+
+/* ══════════ 탭바 (WezTerm Powerline 스타일) ══════════ */
+#tabbar{
+  display:flex; align-items:stretch;
+  height:var(--tabbar-h); flex:0 0 var(--tabbar-h);
+  background:var(--bg); font-size:12px; white-space:nowrap;
+}
+
+/* 앱 마크 `>_` — WezTerm 의 워크스페이스 배지(left_status) 자리를 물려받았다.
+   ⚠ 원래 `default` 라는 죽은 문자열이 86px 을 먹고 있었다(index.html 주석 참조).
+     탭 폭이 아까운 자리라 두 글자로 줄여 30px 만 쓴다 — Powerline 화살표는 그대로 살린다.
+     글자 하나가 아니라 `>_` 두 글자인 이유: `>` 만 두면 화살표(▶)와 겹쳐 읽힌다. */
+#ws-badge{
+  display:flex; align-items:center; padding:0 8px 3px;   /* ↓ 3px = `_` 가 바닥에 붙는 것 보정 */
+  background:var(--tab-on-bg); color:var(--tab-on-fg); font-weight:700;
+  position:relative; margin-right:var(--arrow);
+  font-size:13.5px; letter-spacing:1px; user-select:none;
+}
+#ws-badge::after{
+  content:""; position:absolute; right:calc(-1 * var(--arrow)); top:0;
+  border:calc(var(--tabbar-h) / 2) solid transparent;
+  border-right:0; border-left:var(--arrow) solid var(--tab-on-bg);
+}
+
+#tabs{display:flex; align-items:stretch; min-width:0; overflow:hidden}
+
+.tab{
+  display:flex; align-items:center; gap:7px;
+  padding:0 10px 0 12px; max-width:230px; min-width:0;
+  background:var(--tab-off-bg); color:var(--tab-off-fg);
+  cursor:pointer; position:relative; margin-right:var(--arrow);
+}
+/* Powerline 화살표 = CSS 삼각형 (nerdfont 글리프 없이 SOLID_RIGHT_ARROW 대체) */
+.tab::after{
+  content:""; position:absolute; right:calc(-1 * var(--arrow)); top:0; z-index:1;
+  border:calc(var(--tabbar-h) / 2) solid transparent;
+  border-right:0; border-left:var(--arrow) solid var(--tab-off-bg);
+}
+.tab:hover{background:var(--tab-hover-bg); color:var(--fg)}
+.tab:hover::after{border-left-color:var(--tab-hover-bg)}
+.tab.active{background:var(--tab-on-bg); color:var(--tab-on-fg); font-weight:700}
+.tab.active::after{border-left-color:var(--tab-on-bg)}
+.tab.dead{opacity:.45}
+.tab .label{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.tab .n{opacity:.75; font-size:11px}
+
+/* 프로세스 표시 = 작은 점 하나(WezTerm 의 프로세스 아이콘 자리) */
+.dot{width:6px; height:6px; border-radius:50%; flex:0 0 6px; background:currentColor}
+.dot.claude{background:var(--orange)}
+.dot.shell {background:#7dcfff}
+.dot.node  {background:var(--green)}
+.dot.git   {background:var(--orange)}
+.dot.edit  {background:var(--purple)}
+.dot.busy  {background:var(--green); animation:pulse 1.4s ease-in-out infinite}
+.tab.active .dot{box-shadow:0 0 0 1.5px rgba(26,27,38,.35)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+#new-tab{
+  width:26px; flex:0 0 26px; border:0; background:transparent;
+  color:var(--dim); font:inherit; font-size:15px; line-height:1; cursor:pointer;
+}
+#new-tab:hover{color:var(--fg)}
+.gap{flex:1}
+
+/* 오른쪽: pane 번호 칩 (WezTerm 상태바의 패널 번호 목록과 같은 역할) */
+#panechips{display:flex; align-items:center; gap:4px; padding-right:8px}
+.chip{
+  display:flex; align-items:center; gap:4px;
+  padding:2px 7px; border-radius:4px; font-size:10.5px;
+  background:var(--tab-off-bg); color:var(--tab-off-fg); cursor:pointer;
+}
+.chip .nm{max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.9}
+.chip:hover{background:var(--tab-hover-bg); color:var(--fg)}
+.chip.on{background:var(--orange); color:var(--bg); font-weight:700}   /* 활성 pane */
+.chip.zoomed{background:var(--red); color:var(--bg); font-weight:700}  /* 줌 중 */
+
+#clock, #lag, #offline{
+  display:flex; align-items:center; padding:0 10px;
+  font-size:11px; color:var(--dim);
+}
+#lag{color:var(--orange); padding-right:0}
+#offline{color:var(--red); padding-right:0}
+/* 설치 버튼 — 브라우저가 "설치 가능"이라 알려줄 때만 보인다(이미 설치했으면 안 뜬다) */
+#install{
+  border:1px solid var(--tab-on-bg); background:rgba(122,162,247,.14);
+  color:var(--tab-on-bg); font:inherit; font-size:11px; font-weight:700;
+  padding:2px 9px; margin-right:6px; border-radius:6px; cursor:pointer; white-space:nowrap;
+}
+#install:hover{ background:rgba(122,162,247,.26) }
+
+#fit-me, #kb-toggle{
+  border:0; background:transparent; color:var(--dim);
+  font-size:14px; padding:0 8px; cursor:pointer;
+}
+#fit-me.on, #kb-toggle.on{color:var(--tab-on-bg)}
+
+#rail-toggle{
+  width:24px; flex:0 0 24px; border:0; background:transparent;
+  color:var(--dim); font:inherit; font-size:13px; line-height:1; cursor:pointer;
+}
+#rail-toggle:hover{color:var(--fg)}
+body.rail #rail-toggle{color:var(--tab-on-bg)}
+
+/* ══════════ 세로 세션 레일 (PC 전용, Alt+B) ══════════
+   ⭐ 가로 탭바의 구조적 한계를 옆으로 눕혀 푼다 — 탭당 이름 6자 → 폭 190px 에
+     `이름 · pane 수 · 작업 제목`. 작업 제목(서버가 OSC 로 읽어준 창 제목)은
+     가로 탭바에서는 보여줄 자리가 없어 지금까지 툴팁에도 없던 정보다.
+
+   ⚠ 배치를 `position:fixed` 로 한 이유 — body 는 `flex-direction:column` 이라
+     `#panes` 와 나란히 두려면 래퍼 div 가 필요하고, 그러면 `#panes{flex:1}` 의
+     부모가 바뀌어 `.tabgroup{position:absolute; inset:0}` 기준까지 흔들린다.
+     레일을 띄우고 `#panes` 를 margin 으로 미는 쪽이 기존 레이아웃을 0 으로 건드린다.
+     폭 변화는 `ResizeObserver(#panes)` 가 잡아 PTY 로 재보고한다(app.js). */
+#rail{
+  position:fixed; left:0; top:var(--tabbar-h); bottom:0; width:var(--rail-w); z-index:20;
+  display:block; overflow-y:auto; overscroll-behavior:contain;
+  background:#16161e; border-right:1px solid var(--line);
+  font-size:12px; padding-bottom:8px;
+}
+#rail::-webkit-scrollbar{width:8px}
+#rail::-webkit-scrollbar-track{background:transparent}
+#rail::-webkit-scrollbar-thumb{background:var(--line); border-radius:8px}
+body.rail #panes{margin-left:var(--rail-w)}
+
+/* 머리줄 — "지금 몇 개가 내 입력을 기다리나". 점을 하나하나 훑지 않게 숫자로 준다 */
+.rl-head{
+  padding:6px 9px 5px; font-size:10.5px; color:var(--dim);
+  border-bottom:1px solid var(--line); white-space:nowrap;
+}
+.rl-head .wait{color:var(--orange); font-weight:700}
+
+.rl-tab{
+  padding:5px 8px 6px 9px; border-left:3px solid transparent; cursor:pointer;
+}
+.rl-tab:hover{background:#1e2030}
+.rl-tab.on{background:#232742; border-left-color:var(--tab-on-bg)}
+.rl-tab .l1{display:flex; align-items:center; gap:6px}
+.rl-tab .num{flex:0 0 11px; text-align:right; font-size:10px; color:var(--dim)}
+.rl-tab .nm{
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-weight:700; color:var(--fg);
+}
+.rl-tab .cnt{flex:0 0 auto; font-size:10px; color:var(--dim)}
+.rl-tab.dead{opacity:.45}
+/* 작업 제목 — 이 레일의 존재 이유. 점 색이 상태를 말하므로 스피너 글자는 떼고 요약만 남긴다 */
+.rl-tab .desc{
+  margin:2px 0 0 17px; font-size:10.5px; line-height:1.3; color:var(--dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+.rl-pane{
+  display:flex; align-items:center; gap:6px;
+  padding:3px 8px 3px 22px; border-left:3px solid transparent; cursor:pointer;
+  color:var(--tab-off-fg);
+}
+.rl-pane:hover{background:#1e2030; color:var(--fg)}
+.rl-pane.on{background:#2a2f4a; color:var(--fg); border-left-color:var(--orange)}
+.rl-pane.zoomed{border-left-color:var(--red)}
+.rl-pane.dead{opacity:.45}
+.rl-pane .num{flex:0 0 11px; text-align:right; font-size:10px; color:var(--dim)}
+.rl-pane.on .num{color:var(--orange); font-weight:700}
+.rl-pane.zoomed .num{color:var(--red)}
+.rl-pane .nm{flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* 이름과 제목을 둘 다 쓰는 줄에서만 이름 폭에 상한을 둔다(app.js 의 `hassub`) */
+.rl-pane.hassub .nm{max-width:58%}
+.rl-pane .sub{flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:10.5px; color:var(--dim)}
+.rl-pane .sub:empty{display:none}
+
+/* ══════════ 설치된 PWA 창: 타이틀바 흡수 ══════════
+   WezTerm 의 window_decorations = "INTEGRATED_BUTTONS|RESIZE" 와 같은 모양을 만든다.
+   브라우저가 타이틀바를 그리지 않고 창 버튼만 오버레이로 남기면, 그 자리를 탭바가 차지한다.
+
+   ⚠ 이 블록은 **설치된 PWA 창에서만** 적용된다(`--app=` 로 띄운 창은 해당 없음).
+     일반 브라우저 탭에는 영향이 0 이므로 폰 접속도 그대로다. */
+@media (display-mode: window-controls-overlay){
+  :root{
+    /* 탭 높이를 오버레이 높이에 맞춘다 — Powerline 화살표(::after 의 border 계산)도
+       --tabbar-h 를 쓰므로 따라서 커진다. 값은 시스템 배율에 따라 33~40px. */
+    --tabbar-h: env(titlebar-area-height, 32px);
+  }
+  #tabbar{
+    /* 오른쪽 끝 창 버튼(최소화·최대화·닫기) 영역만큼 비워둔다.
+       titlebar-area-width 는 "버튼을 뺀 나머지 폭"이다. */
+    padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+    /* 탭바 빈 곳을 잡고 창을 옮긴다(= 타이틀바 역할) */
+    -webkit-app-region: drag; app-region: drag;
+  }
+  /* ⚠ drag 영역 안에서는 클릭·마우스 이벤트가 죽는다 → 누를 것들은 전부 제외한다.
+     ⭐ `#ws-badge` 는 2026-09-09 에 이 목록에서 **뺐다** — `default` 배지에서 앱 마크(`>_`)로
+       바뀌어 누를 것이 없어졌고, 그만큼 창을 끌 수 있는 자리가 늘어난다(타이틀바 역할). */
+  #tabbar .tab, #tabbar button, #tabbar .chip, #panechips{
+    -webkit-app-region: no-drag; app-region: no-drag;
+  }
+}
+
+/* ══════════ pane 레이아웃 ══════════ */
+/* config.window_padding = { left=8, right=8, top=8, bottom=0 } 과 같은 여백 */
+#panes{
+  flex:1; min-height:0;
+  background:var(--line);        /* gap 이 분할선으로 보인다 */
+  padding:8px 8px 0 8px;
+  position:relative;             /* .tabgroup 의 absolute 기준 */
+}
+
+/* ⭐⭐⭐ 탭마다 자기 그리드를 갖는다 — **탭 전환이 pane 크기를 흔들지 않게** 하는 핵심.
+   ⚠ 오늘(2026-08-24) 겪은 증상들의 뿌리를 두 번 잘못 짚었다:
+     ① 처음엔 `hidden`(display:none) 으로 pane 을 숨겼다 → 브라우저가 **스크롤을 0 으로,
+        치수를 0 으로** 만들어서 복귀 시 맨 위로 튀고 폭이 어긋났다.
+     ② 그래서 pane 하나씩 `position:absolute` 로 뺐더니, **다른 탭의 분할 수가**
+        숨은 pane 의 크기를 정해버렸다(3분할 탭으로 가면 442px → 294px).
+        크기가 바뀌면 xterm 이 스크롤을 다시 계산해 복귀 후 휠 한 번에 확 튄다.
+   → 탭 전체를 하나의 그룹으로 묶고, **모든 그룹을 같은 영역(inset:0)에 겹쳐 둔다.**
+     그러면 어느 탭에 있든 각 그룹의 크기가 동일하므로 pane 치수·스크롤이 보존된다.
+     안 보이는 그룹은 `visibility:hidden` — 레이아웃은 그대로 살아 있다. */
+.tabgroup{
+  position:absolute; inset:0;
+  display:grid; gap:1px;
+}
+.tabgroup.off{ visibility:hidden; pointer-events:none; z-index:-1 }
+
+.pane{position:relative; min-width:0; min-height:0; background:var(--bg); overflow:hidden}
+.pane .host{width:100%; height:100%}
+/* 분할했을 때만 활성 pane 테두리와 번호를 보여준다(단일 pane 이면 방해만 된다) */
+.tabgroup.split .pane.active{box-shadow:inset 0 0 0 1px var(--tab-on-bg)}
+.tabgroup.split .pane::before{
+  content:attr(data-idx); position:absolute; right:5px; top:2px; z-index:3;
+  font-size:10px; color:var(--dim); pointer-events:none;
+}
+.tabgroup.split .pane.active::before{color:var(--tab-on-bg)}
+/* ⭐ 줌 = **그리드에서 빼내 그룹 전체를 덮는다.**
+   ⚠ 예전엔 `grid-area:1/1/-1/-1` 로 덮었는데, 나머지 pane 을 `display:none` 으로 없앴을 때만
+     통하던 방식이다. 지금은 pane 들이 레이아웃에 남아 있어서 줌 pane 이 그리드 항목으로
+     계산되며 **높이가 내용 크기(13px)로 찌그러졌고**, 덤으로 다른 pane 높이까지 14px 흔들렸다
+     (2026-08-24 실측). `absolute` 로 빼면 그리드 계산에서 사라져 나머지 셀이 그대로 남는다. */
+.pane.zoom{ position:absolute; inset:0; z-index:5 }
+
+/* ⭐ 모바일 관성 스크롤.
+   wezterm-web 은 이 문제를 xterm 을 **버려서**(ansi_up + 네이티브 div) 해결했지만,
+   webterm 은 PTY 직결이라 입력·커서 때문에 xterm 을 못 버린다 → viewport 쪽을 손본다.
+
+   진짜 원인은 CSS 가 아니라 `touchend` 마다 `term.focus()` 를 부르던 코드였다(app.js 참조).
+   포커스가 잡히면 브라우저가 커서 위치로 스크롤을 되돌려 관성이 죽는다.
+   아래는 그 위에 얹는 보강이다. */
+.xterm-viewport{
+  -webkit-overflow-scrolling: touch;   /* iOS 관성 */
+  overscroll-behavior: contain;        /* 끝에서 페이지가 같이 딸려가지 않게 */
+}
+.xterm-viewport::-webkit-scrollbar{width:8px}
+.xterm-viewport::-webkit-scrollbar-track{background:transparent}
+.xterm-viewport::-webkit-scrollbar-thumb{background:var(--line); border-radius:8px}
+.xterm-viewport::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+
+/* ══════════ 우클릭 메뉴 ══════════ */
+#menu{
+  position:fixed; z-index:50; min-width:170px; padding:5px;
+  background:#16161e; border:1px solid var(--line); border-radius:9px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5);
+}
+#menu button{
+  display:block; width:100%; text-align:left;
+  padding:7px 11px; border:0; border-radius:6px;
+  background:transparent; color:var(--fg); font:inherit; font-size:12px; cursor:pointer;
+}
+#menu button:hover{background:var(--tab-hover-bg)}
+#menu button.danger:hover{background:var(--red); color:var(--bg)}
+
+/* ══════════ 인라인 입력 ══════════ */
+#ask{
+  position:fixed; inset:0; z-index:60; display:flex;
+  align-items:flex-start; justify-content:center; padding-top:16vh;
+  background:rgba(10,11,18,.55); backdrop-filter:blur(2px);
+}
+#ask .box{
+  width:min(560px, 92vw); padding:16px 18px 18px;
+  background:#16161e; border:1px solid var(--line); border-radius:12px;
+  box-shadow:0 20px 60px rgba(0,0,0,.55);
+}
+#ask .box label{display:block; font-size:11.5px; color:var(--dim); margin-bottom:8px}
+#ask .box input{
+  width:100%; padding:9px 11px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; outline:none;
+}
+#ask .box input:focus{border-color:var(--tab-on-bg)}
+#ask .hint{margin-top:9px; font-size:10.5px; color:var(--dim)}
+
+/* ══════════ 폰 전용 ══════════ */
+@media (max-width:640px){
+  .tab{max-width:120px; padding:0 8px 0 10px}
+  #clock, #ws-badge{display:none}
+}
+/* 폰은 PTY 크기(PC 기준)를 그대로 그린다 → 화면보다 넓으면 가로로 밀어서 본다 */
+body.phone #panes{padding:4px 2px 0 4px; overflow-x:auto}
+/* ⚠ 그 가로 스크롤바는 **숨기기만** 한다(스크롤은 그대로 — 손가락으로 밀면 된다).
+   PTY 폭(PC 기준 78칸)이 폰 화면(≈40칸)보다 넓으면 브라우저가 트랙을 그리는데,
+   폰에서는 그게 터미널 바닥에 회색 막대로 남아 UI 처럼 보인다(2026-08-27 제보).
+   폭을 맞추고 싶으면 메뉴의 `⤢ 이 화면에 맞추기` — 그건 PTY 를 실제로 좁힌다. */
+body.phone #panes{scrollbar-width:none}
+body.phone #panes::-webkit-scrollbar{display:none}
+body.phone .tab{max-width:112px}
+
+/* ══════════ 폰: 탭·패널 내비 (큰 칩바 + 전체 목록 드로어) ══════════
+   ⚠ PC 의 Powerline 탭바를 폰에 그대로 쓰던 것을 갈아치운다. 폰에서 그 탭은 폭 112px 에
+     높이 28px 짜리라 **손가락보다 작았고**, pane 칩은 번호 하나뿐이라 어디로 가는지 보이지 않았다
+     (사용자 제보 2026-08-27: "wezterm-web 은 탭이랑 pane 보기가 편했는데 이건 불편하다").
+   구조: [≡]  [▸탭 ●pane ●pane │ ▸탭 …]  — 칩바는 가로 스크롤, 활성 칩은 자동으로 가운데. */
+#nav-menu, #navchips, #nav-refit{display:none}
+body.phone #tabbar{height:46px; flex-basis:46px; align-items:center; gap:6px; padding:0 6px}
+body.phone #ws-badge, body.phone #tabs, body.phone #panechips, body.phone #clock{display:none}
+/* 세로 레일은 폰에서 쓰지 않는다 — 칩바+드로어가 같은 역할이고, 폭 190px 을 뺄 화면이 아니다.
+   토글 자체를 app.js 가 폰에서 막지만, 예전 localStorage 값이 남아 있어도 새지 않게 CSS 로 한 번 더 잠근다 */
+body.phone #rail, body.phone #rail-toggle{display:none !important}
+body.phone #panes{margin-left:0 !important}
+/* ⚠ `.gap` 도 반드시 끈다 — PC 탭바에서 오른쪽 칩을 밀어내던 `flex:1` 스페이서다.
+   칩바(`#navchips`)도 `flex:1` 이라 **둘이 남은 폭을 정확히 반씩 나눠 가졌고**,
+   칩바가 화면 절반에서 끝나 세 번째 탭부터 스크롤 밖으로 밀려났다
+   (2026-08-27 사용자 스크린샷: REMS 뒤 구분선까지만 보이고 그 뒤가 텅 빔). */
+body.phone .gap{display:none}
+body.phone #nav-menu{
+  display:flex; align-items:center; justify-content:center;
+  flex:0 0 38px; height:38px; border:0; border-radius:10px;
+  background:var(--tab-off-bg); color:var(--fg); font-size:20px; line-height:1;
+}
+body.phone #nav-menu:active, body.phone #nav-refit:active{background:var(--tab-hover-bg)}
+/* ↻ = 메뉴의 `새로고침`과 같은 동작. 폰에는 우클릭이 없어 손이 닿는 자리에 하나 더 둔다
+   (꾹 누르기 메뉴로도 갈 수 있지만, 화면이 깨졌을 때 가장 급히 찾는 버튼이다). */
+body.phone #nav-refit{
+  display:flex; align-items:center; justify-content:center;
+  flex:0 0 38px; height:38px; border:0; border-radius:10px;
+  background:var(--tab-off-bg); color:var(--fg); font-size:18px; line-height:1;
+}
+body.phone #navchips{
+  display:flex; align-items:center; gap:6px; flex:1; min-width:0;
+  overflow-x:auto; overflow-y:hidden; scrollbar-width:none; -webkit-overflow-scrolling:touch;
+}
+body.phone #navchips::-webkit-scrollbar{display:none}
+.navchip{
+  display:flex; align-items:center; gap:5px; flex:0 0 auto;
+  height:34px; padding:0 12px; border-radius:17px;
+  background:var(--tab-off-bg); color:var(--tab-off-fg);
+  font-size:13px; max-width:150px; white-space:nowrap;
+}
+.navchip .t{overflow:hidden; text-overflow:ellipsis}
+.navchip.tabchip{font-weight:700; color:var(--fg)}
+/* ⚠ 칩 클래스에 `tab` 을 쓰면 안 된다 — PC 탭의 `.tab::after`(Powerline 화살표 삼각형)가
+   `#tabs` 밖에서도 클래스만 보고 따라붙는다. 실제로 활성 칩 오른쪽에 회색 삼각형이 튀어나왔다
+   (2026-08-27 사용자 스크린샷). 그래서 `tabchip` 으로 이름을 갈랐다. */
+.navchip.on{background:#232742; box-shadow:inset 0 0 0 1.5px #7dcfff; color:var(--fg)}
+.navchip.dead{opacity:.45}
+.navsep{flex:0 0 auto; width:1px; height:20px; background:#3b4261; margin:0 2px}
+
+/* 드로어 — 화면을 덮는 목록. 행 높이를 크게 잡아 손가락으로 고른다. */
+#drawer{position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.55); display:flex}
+#drawer .dw-panel{
+  display:flex; flex-direction:column; width:100%; max-width:86%; max-height:100%;
+  background:var(--bg); border-right:1px solid #3b4261;
+}
+/* 오른쪽 14% 는 **일부러 비워둔 배경**이다 — 거기를 탭하면 닫힌다(✕ 는 한 손으로 멀다) */
+.navchip .cnt{opacity:.6; font-size:11px}
+#drawer .dw-head{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 14px; font-size:15px; font-weight:700; color:var(--fg);
+  border-bottom:1px solid #292e42;
+}
+#drawer .dw-head button{background:none; border:0; color:var(--fg); font-size:18px; padding:4px 8px}
+#dw-list{flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch}
+.dw-tab{
+  display:flex; align-items:center; gap:8px; padding:12px 14px 8px;
+  font-size:14px; font-weight:700; color:#7dcfff;
+}
+.dw-tab .cnt{font-weight:400; opacity:.6; font-size:12px}
+.dw-pane{
+  display:flex; align-items:center; gap:10px; padding:12px 14px 12px 28px;
+  font-size:14px; color:var(--fg); border-top:1px solid #22263a;
+}
+.dw-pane .num{opacity:.6; min-width:14px}
+.dw-pane .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dw-pane .cwd{font-size:11px; opacity:.5; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dw-pane.on{background:#232742; box-shadow:inset 3px 0 0 #7dcfff}
+.dw-pane.dead{opacity:.45}
+.dw-foot{display:flex; gap:8px; padding:10px 14px; border-top:1px solid #292e42}
+.dw-foot button{
+  flex:1; height:42px; border:0; border-radius:10px;
+  background:var(--tab-off-bg); color:var(--fg); font-size:14px;
+}
+.dw-foot button:active{background:var(--tab-hover-bg)}
+/* 헤더에서 옮겨온 두 버튼은 헤더용 규칙(id 선택자)이 더 세므로 여기서 되돌린다 */
+.dw-foot #new-tab, .dw-foot #install{
+  flex:1; width:auto; height:42px; padding:0 12px; border-radius:10px;
+  background:var(--tab-off-bg); color:var(--fg); font-size:14px;
+}
+
+/* ══════════ 폰: 플로팅 특수키 도크 ══════════
+   하단 고정 바는 항상 두 줄(약 90px)을 먹었다. 폰에서는 그만큼이 아깝고,
+   읽는 시간이 대부분이라 **평소엔 점 하나만** 띄우고 필요할 때 펼친다. */
+/* `#kb-fab`(플로팅 특수키 버튼)은 2026-08-24 에 없앴다 — 도크가 키보드에 붙어 다니므로
+   그것을 여는 버튼이 필요 없어졌고, 늘 화면을 가리던 것도 함께 사라졌다. */
+
+body.phone #pad{
+  /* ⭐ 키보드 바로 위에 **딱 붙는 한 줄**. `bottom` 은 app.js 가 실제 키보드 높이로 넣는다.
+     ⚠ 예전에는 화면에 떠 있는 카드(좌우 10px 띄우고 둥근 모서리 18px, FAB 위 76px)였다.
+       FAB 을 없애고 키보드와 한 몸으로 만들면서, 키보드의 연장처럼 보이도록
+       **좌우 여백 0 · 아래 모서리 각지게** 바꿨다. */
+  position:fixed; z-index:39;
+  right:0; left:0; bottom:0;
+  flex:0 0 auto; border:0; border-top:1px solid rgba(122,162,247,.22);
+  border-radius:0; padding:5px 5px;
+  background:rgba(22,22,30,.94);
+  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+  box-shadow:0 -6px 20px rgba(0,0,0,.4);
+  animation:dock-in .14s ease-out;
+}
+/* 키보드 위에 붙으므로 safe-area 여백이 필요 없다(그 영역은 키보드가 덮는다) */
+body.phone #pad{ padding-bottom:5px }
+
+@keyframes dock-in{ from{ opacity:0; transform:translateY(10px) } }
+
+/* 키보드가 떠 있을 때 — 도크와 FAB 의 bottom 은 app.js 가 실제 키보드 높이로 직접 넣는다
+   (fixed 는 body 를 줄여도 레이아웃 뷰포트 기준이라, 안 올리면 키보드 뒤로 숨는다).
+   ⚠ 예전에는 여기서 FAB 을 `display:none` 으로 숨겼는데, 그 규칙이 폴더블에서 사고가 됐다 —
+     "접힌 화면"을 키보드로 오판하면(app.js 의 옛 baseH 방식) 이 한 줄 때문에
+     **접을 때마다 플로팅 버튼이 통째로 사라졌다**(사용자 제보 2026-08-24).
+     판정은 고쳤고, 숨기는 규칙도 없앤다 — 입력 중에도 Esc·Ctrl 은 필요하다. */
+
+/* 도크 안에서는 키를 조금 더 촘촘하게 — 화면을 덜 가리는 것이 목적이다 */
+body.phone .kb-key{ height:46px; border-radius:9px; background:rgba(41,46,66,.9); font-size:15px; }
+body.phone .kb-abtn{ padding:6px 0; border-radius:9px; background:rgba(36,40,59,.9); }
+/* 방향키는 십자 스와이프 대신 **네 개의 큰 키**다(폰에서 대각선이 잘 안 맞았다).
+   페이지 이동(PgUp/PgDn)·줄 끝(Home/End)은 꾹 누르기로 옮겼다. */
+body.phone .kb-key.nav2{ height:46px; font-size:19px; color:var(--fg); }
+body.phone .kb-key.act{ background:rgba(36,53,77,.92); color:#7dcfff; font-size:18px; }
+
+#pad{
+  flex:0 0 auto; background:#16161e; border-top:1px solid var(--line);
+  padding:5px; padding-bottom:calc(5px + env(safe-area-inset-bottom));
+  display:flex; flex-direction:column; gap:4px;
+}
+.kb-actbar{display:flex; gap:5px}
+.kb-abtn{flex:1; padding:5px 0; font-size:11px; color:var(--tab-on-bg);
+  background:var(--tab-off-bg); border:1px solid var(--line); border-radius:6px; text-align:center}
+.kb-row{display:flex; gap:4px}
+/* ⚠ touch-action:none 이 핵심 — 없으면 키 위 스와이프를 브라우저가 페이지 스크롤로 먹는다 */
+.kb-key{
+  position:relative; flex:1 1 0; min-width:0; height:44px;
+  background:#292e42; border:1px solid #3b4261; border-radius:6px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:16px; color:var(--fg); touch-action:none;
+  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+}
+.kb-key.down{background:#3b4261; border-color:var(--tab-on-bg)}
+.kb-key.fn{background:var(--tab-off-bg); color:#9aa5ce; font-size:13px}
+.kb-key.act{background:#24354d; color:#7dcfff}
+.kb-main{pointer-events:none}
+.kb-sub{position:absolute; font-size:8.5px; line-height:1; color:var(--dim); pointer-events:none}
+.kb-key.nav .kb-main{color:#3b4261}
+.kb-key.nav .kb-n, .kb-key.nav .kb-s,
+.kb-key.nav .kb-w, .kb-key.nav .kb-e{font-size:15px; color:var(--fg)}
+.kb-nw{top:2px; left:3px}
+.kb-n {top:2px; left:50%; transform:translateX(-50%)}
+.kb-ne{top:2px; right:3px}
+.kb-w {left:3px; top:50%; transform:translateY(-50%)}
+.kb-e {right:3px; top:50%; transform:translateY(-50%)}
+.kb-sw{bottom:2px; left:3px}
+.kb-s {bottom:2px; left:50%; transform:translateX(-50%)}
+.kb-se{bottom:2px; right:3px}
+#pad.shifted .modkey-shift, #pad.ctrl-on .modkey-ctrl{
+  background:#2d4a34; border-color:var(--green); color:var(--green);
+}
+#pad.shift-lock .modkey-shift, #pad.ctrl-lock .modkey-ctrl{
+  background:var(--green); border-color:var(--green); color:var(--bg); font-weight:700;
+}
+#send-form{
+  flex:0 0 auto; background:#16161e; border-top:1px solid var(--line);
+  padding:6px; padding-bottom:calc(6px + env(safe-area-inset-bottom));
+  display:flex; gap:6px; align-items:flex-end;
+}
+/* 폰: 키보드가 떠도 페이지가 밀려 올라가지 않게 고정한다.
+   높이는 app.js 가 visualViewport 값으로 직접 넣는다(키보드를 뺀 실제 보이는 높이). */
+/* 폰: 터미널 영역은 세로 스크롤 제스처만 받는다.
+   ⚠ 이건 **관성 스크롤을 못 붙인 뷰포트용 폴백**이다. `attachInertia` 가 붙은 뷰포트는
+   app.js 가 `touch-action:none` 으로 덮는다 — `pan-y` 를 남겨두면 브라우저가 세로 팬을
+   가져가면서(preventDefault 무시 + touchcancel) 꾹 눌러 잡은 선택이 죽는다. */
+body.phone .xterm-viewport{ touch-action: pan-y; }
+
+/* ⚠ body 의 user-select:none 을 여기서 되돌린다(모바일에서 입력이 막힌다) */
+#cmd{
+  flex:1; background:var(--bg); color:var(--fg); border:1px solid #3b4261;
+  border-radius:6px; padding:9px 10px; font-size:15px;
+  line-height:20px; min-height:40px; max-height:96px;
+  overflow-y:auto; outline:none; word-break:break-all; text-align:left;
+  -webkit-user-modify:read-write-plaintext-only;
+  -webkit-user-select:text; user-select:text; touch-action:auto;
+}
+#cmd:focus{border-color:var(--tab-on-bg)}
+#cmd:empty:before{content:attr(data-ph); color:var(--dim); pointer-events:none}
+
+/* ══════════ 폰: 읽기용 스크롤 도크 ══════════
+   키보드가 꺼져 있을 때(= 읽는 중)만 뜬다. 키보드를 켜면 특수키 도크가 이 자리를 대신한다.
+   폰에서 긴 출력을 되짚어 보려면 관성 스크롤로 한참 밀어야 했다 —
+   PgUp/PgDn/맨아래 세 개면 그 일이 한 번에 끝난다. */
+body.phone #scrollpad{
+  position:fixed; z-index:38;
+  left:0; right:0; bottom:0;
+  display:flex; gap:6px; padding:5px 8px;
+  padding-bottom:calc(5px + env(safe-area-inset-bottom));
+  background:rgba(22,22,30,.94);
+  border-top:1px solid rgba(122,162,247,.18);
+  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+}
+body.phone #scrollpad button{
+  flex:1 1 0; height:42px; border-radius:9px;
+  background:rgba(41,46,66,.9); border:1px solid #3b4261;
+  color:var(--fg); font:inherit; font-size:19px; line-height:1;
+  touch-action:manipulation; -webkit-tap-highlight-color:transparent;
+}
+body.phone #scrollpad button:active{ background:var(--tab-hover-bg) }
+
+/* ══════════ 한글 IME 조합 표시 ══════════
+   ⚠ xterm 기본 스타일이 조합 중인 글자를 **검은 배경 + 흰 글자**로 그린다
+     (`vendor/xterm.css` 의 `.composition-view` — `background:#000; color:#FFF`).
+     Tokyo Night 테마와 전혀 안 맞아 "한 글자 치면 검게 칠해진다"로 보인다
+     (2026-08-24 제보). 그 파일은 vendor 라 건드리지 않고 여기서 덮는다.
+
+   조합 중임은 **밑줄**로 알린다 — IME 의 관례이고, 배경을 칠하지 않으니
+   뒤 글자를 가리지 않는다.
+
+   ⚠ 위치가 어긋나는 것은 xterm 자신의 미해결 문제다
+     (그 파일에 `TODO: Composition position got messed up somewhere` 가 그대로 있다).
+     스타일로는 완화만 되고, 근본은 xterm 쪽 몫이다. */
+.xterm .composition-view{
+  background: var(--bg) !important;
+  color: var(--fg) !important;
+  border-bottom: 2px solid var(--tab-on-bg);
+  box-shadow: 0 0 0 1px var(--line);
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+/* ══════════ Alt 십자선(열 선택 모드) 끄기 ══════════
+   ⚠ xterm 은 Alt 를 누르면 '열(블록) 선택'으로 보고 커서를 십자선으로 바꾼다
+     (`vendor/xterm.css` 의 `.xterm.column-select.focus{cursor:crosshair}`).
+     우리는 Alt 를 **패널 계층**(Alt+1~9 줌 · Alt+←→ 이동 · Alt+X 닫기)으로 쓰므로
+     그 모드가 아예 없다 — 십자선은 "Alt 를 webterm 이 물었다"는 오해만 준다.
+     Alt+Tab 으로 창을 떠나면 keyup 을 못 받아 **눌린 채로 굳기까지 한다**
+     (2026-08-26 제보). 굳은 클래스 자체는 app.js 에서 털고, 모양은 여기서 죽인다. */
+.xterm.column-select.focus{ cursor: default !important }

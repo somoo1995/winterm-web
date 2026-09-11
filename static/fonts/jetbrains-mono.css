@@ -1,0 +1,44 @@
+/* JetBrains Mono — WezTerm 이 바이너리에 내장해 쓰는 그 폰트.
+ *
+ * 시스템에 설치돼 있지 않아서 브라우저는 볼 수 없었고, 예전엔 조용히 Consolas 로 폴백됐다.
+ * 여기서는 라틴 서브셋만 얹는다(92KB) — 한글·기호는 Sarasa Fixed K 가 받는다.
+ *
+ * ⭐ 폭이 WezTerm 과 맞아떨어지는 이유:
+ *      WezTerm  셀 9px / 한글 글리프 15px / 2칸 18px = 83% 채움
+ *      여기     셀 0.6em / 한글 1.0em    / 2칸 1.2em = 83% 채움
+ *    영문을 JetBrains(0.6em)로 두고 한글을 Sarasa(1.0em)로 받으면 비율이 같아진다.
+ *
+ * ⚠ weight 는 500(Medium) 이 실제로 존재하는 파일이다. `.wezterm.lua` 의 weight="Medium" 과 같다.
+ *   없는 굵기를 요청하면 브라우저가 합성(synthetic bold)하며 획이 뭉갠다.
+ */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("jbm/jetbrains-mono-latin-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("jbm/jetbrains-mono-latin-700-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 500;
+  font-display: block;
+  src: url("jbm/jetbrains-mono-latin-500-italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 700;
+  font-display: block;
+  src: url("jbm/jetbrains-mono-latin-700-italic.woff2") format("woff2");
+}
