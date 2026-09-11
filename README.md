@@ -77,35 +77,54 @@ winterm-web 은 PTY 를 직접 소유한다. 그래서 실시간이 노력의 �
 
 ## 설치
 
-### 간편 설치 (권장)
+### 원클릭 설치 (권장)
 
-저장소를 받아서 **`install.bat` 을 더블클릭**하면 끝이다.
+**[webterm-setup.bat 다운로드](https://raw.githubusercontent.com/somoo1995/winterm-web/main/webterm-setup.bat)**
+← 우클릭 → "다른 이름으로 저장" 후 **더블클릭**. 그게 전부다.
 
-1. [ZIP 다운로드](https://github.com/somoo1995/winterm-web/archive/refs/heads/main.zip) 하고 압축을 푼다
-   (git 이 있으면 `git clone https://github.com/somoo1995/winterm-web.git`)
-2. 폴더 안의 **`install.bat` 더블클릭**
+이 파일 하나가 알아서 한다:
 
-설치기가 알아서 한다:
+1. GitHub 에서 소스를 내려받아 `%LOCALAPPDATA%\winterm-web` 에 푼다
+2. 파이썬이 없으면 winget 으로 3.12 를 설치한다
+3. 의존성을 설치한다
+4. **자동시작 등록 여부를 물어본다** (`y` 한 글자면 등록)
+5. 서버를 띄우고 브라우저를 연다
 
-- 파이썬이 없으면 winget 으로 3.12 설치
-- 의존성 설치 (`python -m pip install -r requirements.txt`)
-- 로그온 시 자동시작 등록 여부를 물어본다 (기본 아니오)
-- 서버를 띄우고 브라우저를 연다
+설치가 끝나면 **바탕화면에 `winterm-web` 바로가기**가 생긴다. 서버가 꺼져 있으면
+알아서 띄우고 브라우저를 열어주므로, 자동시작을 안 걸어도 이걸로 쓰면 된다.
 
-`.bat` 인 이유가 있다 — **PowerShell 실행 정책을 타지 않는다.** 새 Windows 의 기본값
-(`Restricted`)에서는 `.ps1` 이 전부 차단되는데, 그게 첫 실행 실패의 1순위다.
-`install.bat` 은 그 관문을 아예 건너뛴다.
+묻지 않고 자동시작까지 한 번에 하려면 `cmd` 에서:
 
-옵션(묻지 않고 진행):
-
-```powershell
-.\install.bat -Autostart      # 자동시작까지 등록
-.\install.bat -NoAutostart    # 자동시작 없이
-.\install.bat -NoStart        # 설치만 하고 안 띄움
+```
+webterm-setup.bat -Autostart
 ```
 
-제거는 **`uninstall.bat`** — 자동시작을 해제하고 서버를 멈춘다. 소스는 안 지우니
-폴더를 통째로 삭제하면 완전히 사라진다.
+| 필요한 것 | |
+| --- | --- |
+| OS | Windows 10 1803+ / 11 (`curl`·`tar` 내장 버전) |
+| 권한 | **관리자 불필요** — 전부 사용자 영역에 설치 |
+| 그 외 | 없음. 파이썬도 설치기가 깐다 |
+
+설치 위치를 바꾸려면 `cmd` 에서 `set WINTERM_DEST=D:pps\winterm-web` 후 실행.
+
+제거는 설치 폴더의 **`uninstall.bat`** — 자동시작과 바로가기를 해제하고 서버를 멈춘다.
+폴더를 지우면 완전히 사라진다.
+
+> `.exe`/`.msi` 가 아니라 `.bat` 인 이유: 서명 안 된 설치 파일은 SmartScreen 이
+> "알 수 없는 게시자"로 막고(코드서명 인증서는 유료), `.ps1` 은 PowerShell 실행 정책에
+> 막힌다. `.bat` 은 둘 다 해당이 없다.
+
+### 이미 받아둔 폴더에서 설치
+
+저장소를 clone 했거나 ZIP 을 풀어둔 상태라면 그 안의 **`install.bat` 을 더블클릭**하면 된다.
+`webterm-setup.bat` 이 마지막에 부르는 것과 같은 설치기다.
+
+```
+install.bat -Autostart      # 묻지 않고 자동시작까지
+install.bat -NoAutostart    # 자동시작 없이
+install.bat -NoStart        # 설치만 하고 안 띄움
+install.bat -NoShortcut     # 바탕화면 바로가기 없이
+```
 
 ### 수동 설치
 
