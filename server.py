@@ -1,12 +1,12 @@
 """
-webterm 웹서버 — 브라우저와 세션 데몬 사이의 **순수 중계기**
+webterm web server - a pure relay between the browser and the session daemon.
 
-이 프로세스는 세션 상태를 하나도 갖지 않는다. PTY 는 daemon.py 가 소유한다.
-따라서 이 서버는 마음껏 재시작해도 되고, 그동안에도 셸은 계속 살아있다.
+This process holds no session state; the PTY is owned by daemon.py. So this server can be
+restarted freely and the shells keep living through it.
 
-    [브라우저 xterm.js] ──WebSocket──▶ [이 서버(중계)] ──TCP──▶ [세션 데몬] ──PTY──▶ [powershell]
+    [browser xterm.js] --WebSocket--> [this server (relay)] --TCP--> [session daemon] --PTY--> [powershell]
 
-wezterm-web 과의 차이: get-text 폴링(1.5초)이 아니라 PTY 스트림 직결(지연 = 네트워크 RTT).
+Difference from wezterm-web: not get-text polling (1.5s) but a direct PTY stream (latency = network RTT).
 """
 import asyncio
 import json
@@ -29,15 +29,15 @@ import daemon_client as dc
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
 
-# ⚠ Windows 의 python `mimetypes` 는 **레지스트리**를 읽는데 `.woff2`·`.woff` 가 없는 경우가 많다.
-#   그러면 StaticFiles 가 웹폰트를 `text/plain` 으로 내보내고, 브라우저는 그걸 폰트로 안 쓴다
-#   → 지정한 폰트가 조용히 폴백된다(원인을 짐작하기 어려운 종류의 고장).
+# Python's `mimetypes` on Windows reads the REGISTRY, which often lacks `.woff2` / `.woff`.
+# Then StaticFiles serves web fonts as `text/plain` and the browser won't use them as fonts
+# -> the chosen font silently falls back (a hard-to-guess kind of failure).
 mimetypes.add_type("font/woff2", ".woff2")
 mimetypes.add_type("font/woff", ".woff")
 mimetypes.add_type("font/ttf", ".ttf")
 
-# pythonw.exe 로 띄우면 sys.stdout/stderr 가 None 이라, 거기에 쓰려는 uvicorn 로거가
-# 기동 즉시 죽는다(콘솔 창을 안 띄우려고 pythonw 를 쓰므로 반드시 막아야 한다).
+# Under pythonw.exe, sys.stdout/stderr are None, so the uvicorn logger that writes to them
+# dies at startup (we use pythonw to avoid a console window, so this must be guarded).
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
@@ -56,16 +56,15 @@ log = logging.getLogger("webterm")
 @asynccontextmanager
 async def lifespan(app):
     ok = await dc.ensure_daemon()
-    log.info("webterm started (데몬 연결 %s), static=%s", "OK" if ok else "실패", STATIC)
+    log.info("webterm started (daemon connection %s), static=%s", "OK" if ok else "FAIL", STATIC)
     yield
-    # 세션은 데몬이 들고 있으므로 여기서 아무것도 정리하지 않는다 — 그게 분리의 목적이다
-    log.info("webterm stopped (세션은 데몬에 그대로 살아있음)")
+    # The daemon holds the sessions, so nothing is cleaned up here - that's the point of the split
+    log.info("webterm stopped (sessions stay alive in the daemon)")
 
 
-# ⚠ JSON 은 늘 UTF-8 이라 charset 을 안 붙이는 것이 표준이지만(RFC 8259),
-#   **PowerShell 5.1 의 Invoke-RestMethod 는 charset 이 없으면 latin-1 로 디코딩**해
-#   한글 응답이 `ì¤í¬ê²ì¦` 처럼 깨진다. 브라우저는 멀쩡하므로 눈치채기 어렵다.
-#   스킬·CLI 가 PowerShell 로 붙으므로 여기서 명시해준다.
+# JSON is always UTF-8 so omitting charset is standard (RFC 8259), but PowerShell 5.1's
+# Invoke-RestMethod decodes as latin-1 when charset is absent, garbling non-ASCII responses.
+# The browser is fine, so it's easy to miss. Skills/CLI attach over PowerShell, so we spell it out.
 class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
@@ -73,8 +72,8 @@ class UTF8JSONResponse(JSONResponse):
 app = FastAPI(title="webterm", lifespan=lifespan, default_response_class=UTF8JSONResponse)
 
 
-# pythonw 로 띄우면 콘솔이 없어 예외가 어디에도 안 남는다.
-# (BaseHTTPMiddleware 는 starlette 1.0 에서 진짜 예외를 EndOfStream 으로 덮으므로 쓰지 않는다)
+# Under pythonw there's no console, so exceptions land nowhere.
+# (Don't use BaseHTTPMiddleware - in starlette 1.0 it masks real exceptions as EndOfStream.)
 @app.exception_handler(Exception)
 async def log_exceptions(request, exc):
     log.exception("unhandled %s %s", request.method, request.url.path)
@@ -83,23 +82,24 @@ async def log_exceptions(request, exc):
 
 @app.exception_handler(dc.DaemonDown)
 async def daemon_down(request, exc):
-    log.error("데몬 연결 실패: %s", exc)
+    log.error("daemon connection failed: %s", exc)
     return UTF8JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
 
 
-# ── 브라우저발 공격 차단 ──────────────────────────────────────────────────────
-# ⚠ 이것은 "인증"이 아니다. 누가 접근할 수 있느냐는 네트워크(사설망/Tailscale)가 정한다.
-#   여기서 막는 것은 그 방식으로는 못 막는 경로 하나 — **사용자 자신의 브라우저**가
-#   loopback 으로 때리는 공격이다. 공격자가 tailnet 안에 있을 필요가 없어서 VPN 이 무력하다.
+# -- Browser-originated attack guard -------------------------------------------
+# This is NOT "authentication". Who can reach the server is decided by the network
+# (a private network / Tailscale). What this blocks is the one path that can't stop -
+# an attack from the user's OWN browser hitting loopback. The attacker needn't be inside
+# the tailnet, so a VPN is powerless.
 #
-#   실측(2026-09-10, 격리 인스턴스):
-#     · Host: attacker-rebind.example 로 GET /api/sessions → 200, 세션 목록과 sid 반환
-#     · Origin: https://evil.example 로 ws://…/ws/<sid>    → 수락, 읽기·쓰기 모두 가능
-#     · Origin: https://evil.example 로 multipart POST /api/upload → 200, 파일 심어짐
-#   (반면 /api/send 에 text/plain 로 넣는 고전 CSRF 는 FastAPI 가 content-type 을 봐서 422)
+#   Measured (2026-09-10, isolated instance):
+#     - Host: attacker-rebind.example on GET /api/sessions -> 200, returned session list and sid
+#     - Origin: https://evil.example on ws://.../ws/<sid>   -> accepted, full read/write
+#     - Origin: https://evil.example on multipart POST /api/upload -> 200, file planted
+#   (Whereas classic CSRF via text/plain on /api/send is 422 - FastAPI checks the content-type.)
 #
-# ⚠ BaseHTTPMiddleware 를 쓰지 않는다 — starlette 1.0 에서 진짜 예외를 EndOfStream 으로
-#   덮는다(DEVLOG 함정 #4). 순수 ASGI 는 그 경로를 안 타고, http 와 websocket 을 한자리에서 본다.
+# Don't use BaseHTTPMiddleware - in starlette 1.0 it masks real exceptions as EndOfStream
+# (DEVLOG pitfall #4). Pure ASGI avoids that path and sees http and websocket in one place.
 _UNSAFE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
@@ -114,19 +114,19 @@ class BrowserGuard:
                  for k, v in (scope.get("headers") or [])}
             host, origin = h.get("host", ""), h.get("origin")
 
-            # ① DNS 리바인딩 — 위조된 Host 로 오면 동일 출처 취급이 성립해 CORS 가 무력해진다
+            # (1) DNS rebinding - a forged Host makes it same-origin, defeating CORS
             if not config.host_allowed(host):
-                log.warning("차단(Host) %r → %s", host, scope.get("path"))
+                log.warning("blocked (Host) %r -> %s", host, scope.get("path"))
                 return await self._deny(kind, send, f"host not allowed: {host}")
 
-            # ② 교차출처 WebSocket — WebSocket 에는 CORS 가 적용되지 않으므로 직접 봐야 한다
+            # (2) Cross-origin WebSocket - CORS doesn't apply to WebSocket, so check it directly
             if kind == "websocket" and not config.origin_allowed(origin):
-                log.warning("차단(WS Origin) %r", origin)
+                log.warning("blocked (WS Origin) %r", origin)
                 return await self._deny(kind, send, "origin not allowed")
 
-            # ③ 교차출처 쓰기 — multipart 는 preflight 없이 날아온다(/api/upload 가 뚫렸다)
+            # (3) Cross-origin write - multipart arrives with no preflight (/api/upload was exploitable)
             if kind == "http" and scope.get("method") in _UNSAFE_METHODS                     and not config.origin_allowed(origin):
-                log.warning("차단(Origin) %s %s from %r", scope.get("method"),
+                log.warning("blocked (Origin) %s %s from %r", scope.get("method"),
                             scope.get("path"), origin)
                 return await self._deny(kind, send, "origin not allowed")
 
@@ -148,7 +148,7 @@ class BrowserGuard:
 app.add_middleware(BrowserGuard)
 
 
-# uvicorn 자체 로거도 파일로 끌어온다
+# Route uvicorn's own loggers into the file too
 for _n in ("uvicorn", "uvicorn.error", "uvicorn.access"):
     _lg = logging.getLogger(_n)
     _lg.handlers = _handlers
@@ -156,52 +156,53 @@ for _n in ("uvicorn", "uvicorn.error", "uvicorn.access"):
 
 
 async def _ask(msg):
-    """데몬에 제어 요청. 실패는 그대로 올려 예외 핸들러가 503 으로 만든다."""
+    """Control request to the daemon. Errors propagate so the exception handler turns them into 503."""
     res = await dc.request(msg)
     if not res.get("ok"):
         raise RuntimeError(res.get("error", "daemon error"))
     return res.get("result", {})
 
 
-# ⭐ 엔터는 **본문과 같은 chunk 에 실으면 안 된다.**
-#   데몬의 write op 은 submit 이면 `text + "\r"` 을 한 번에 PTY 에 쓰는데, 실측(2026-08-26)해 보면
-#   6/6 전부 `"HELLO1\r"` 처럼 **한 덩어리로 도착**한다. 셸(PSReadLine)은 이래도 실행하지만
-#   claude 같은 TUI 는 뭉쳐 들어온 입력을 **붙여넣기로 판정**해서 끝의 `\r` 을 '제출'이 아니라
-#   '줄바꿈'으로 먹는다 → 글은 들어갔는데 엔터만 안 눌린 것처럼 보인다(체감 확률 50%,
-#   판정이 길이·타이밍에 걸려 있어 될 때도 있는 것이 더 헷갈린다).
-#   → 본문을 먼저 넣고, **사람이 치는 정도의 간격을 둔 뒤 `\r` 만 따로** 보낸다.
-SUBMIT_GAP = 0.15   # 초. paste 판정 윈도우를 넘기기 위한 최소 간격
+# The Enter must NOT ride in the same chunk as the body.
+#   The daemon's write op, when submit, writes `text + "\r"` to the PTY in one go, but measured
+#   (2026-08-26) all 6/6 arrive as a single lump like `"HELLO1\r"`. A shell (PSReadLine) runs it
+#   fine, but a TUI like claude judges lumped input as a PASTE and treats the trailing `\r` as a
+#   line break, not "submit" -> the text is in but Enter seems not pressed (~50% of the time; it
+#   sometimes works because the judgment depends on length/timing, which is more confusing).
+#   -> Write the body first, then, after a human-like gap, send `\r` on its own.
+SUBMIT_GAP = 0.15   # seconds. minimum gap to clear the paste-detection window
 
 
 def _as_text(v):
-    """PTY 에 쓸 값을 문자열로 정규화한다 — **비-str 이 데몬까지 새어나가지 않게 하는 관문**이다.
+    """Normalize the value to write to the PTY into a string - the gate that keeps a non-str from
+    leaking through to the daemon.
 
-    ⭐ PowerShell 5.1 의 `ConvertTo-Json` 함정 때문에 필요하다(2026-09-01 실측).
-      값이 순수 `[string]` 이 아니라 **ETS NoteProperty 가 붙은 `PSObject`** 면
-      `ConvertTo-Json` 이 그것을 객체로 펼쳐서 `{"value":"본문","Count":1}` 로 보낸다.
-      ⚠ **길이 문제가 아니다** — 2만자 순수 문자열도 정상 직렬화된다. 값이 어디서 감싸졌는지는
-      보내는 쪽도 모르므로(파이프라인 어디서든 붙는다) **받는 쪽에서 벗기는 것이 맞다.**
-      막지 않으면 dict 가 그대로 `session.write` 까지 흘러가
-      `TypeError: argument 'to_write': 'dict' object is not an instance of 'str'` 로 끝난다.
+    Needed because of a PowerShell 5.1 `ConvertTo-Json` pitfall (measured 2026-09-01):
+      if the value isn't a pure `[string]` but a `PSObject` with an ETS NoteProperty attached,
+      `ConvertTo-Json` expands it into an object and sends `{"value":"body","Count":1}`.
+      It's NOT a length issue - a 20k-char pure string serializes fine. The sender can't tell where
+      the wrapping happened (it can attach anywhere in the pipeline), so the receiver should unwrap it.
+      Left unguarded, the dict flows all the way to `session.write` and ends in
+      `TypeError: argument 'to_write': 'dict' object is not an instance of 'str'`.
     """
     if isinstance(v, str):
         return v
     if isinstance(v, dict) and isinstance(v.get("value"), str):
-        log.warning("text 가 PSObject 로 감싸져 도착 — value 를 꺼내 복구한다 (keys=%s)",
+        log.warning("text arrived wrapped as a PSObject - recovering by extracting value (keys=%s)",
                     sorted(v.keys()))
         return v["value"]
     if isinstance(v, list) and all(isinstance(x, str) for x in v):
-        # PowerShell 배열(`Get-Content` 등 `-Raw` 없이 읽은 값)이 join 없이 온 경우
-        log.warning("text 가 배열로 도착 — 줄바꿈으로 이어붙인다 (%d줄)", len(v))
+        # A PowerShell array (e.g. Get-Content read without -Raw) arrived un-joined
+        log.warning("text arrived as an array - joining with newlines (%d lines)", len(v))
         return "\n".join(v)
     if isinstance(v, (int, float, bool)):
         return str(v)
-    # RuntimeError(=데몬 장애, 404) 와 섞이지 않게 ValueError 로 던진다 → 라우트가 400 으로 구분
-    raise ValueError(f"text 는 문자열이어야 합니다 — 받은 타입: {type(v).__name__}")
+    # Raise ValueError (not RuntimeError, which means daemon failure -> 404) so the route maps it to 400
+    raise ValueError(f"text must be a string - got type: {type(v).__name__}")
 
 
 async def _write(sid, text, submit):
-    """PTY 쓰기. submit 이면 본문과 엔터를 **다른 chunk 로** 나눠 보낸다."""
+    """Write to the PTY. On submit, send the body and Enter as SEPARATE chunks."""
     text = _as_text(text)
     if text:
         await _ask({"op": "write", "sid": sid, "text": text, "submit": False})
@@ -213,22 +214,22 @@ async def _write(sid, text, submit):
 
 @app.get("/")
 async def index():
-    """⚠ **index.html 만은 절대 캐시하지 않는다.**
+    """index.html is the ONE file we never cache.
 
-    정적 파일의 새 버전은 이 파일 안의 `?v=N` 캐시버스터로 알린다 —
-    그런데 **그 알림을 담은 파일이 캐시되면** 폰은 새 코드가 나와도 영영 옛 버전을 문다.
-    실제로 겪었다(2026-08-24): 서버는 v=47 을 서빙하는데 폰 로그에는 계속 `app.js?v=44` 가 찍혔고,
-    고친 것이 하나도 반영되지 않아 "안 되는데?"가 반복됐다. sw.js 가 아무것도 캐시하지 않는데도
-    브라우저 HTTP 캐시만으로 이 일이 벌어진다.
-    → 이 한 파일은 매번 새로 받게 하고, 무거운 정적 파일은 `?v=N` 으로 계속 캐시시킨다.
+    New versions of static files are announced by the `?v=N` cache-buster inside THIS file - but if
+    the file carrying that announcement is itself cached, the phone keeps biting the old version even
+    after new code ships. Hit this for real (2026-08-24): the server served v=47 while the phone log
+    kept showing `app.js?v=44`, nothing landed, and "it's not working?" repeated. It happens from the
+    browser HTTP cache alone, even though sw.js caches nothing.
+    -> Make this one file fetch fresh every time; keep caching the heavy static files via `?v=N`.
     """
     return FileResponse(os.path.join(STATIC, "index.html"),
                         headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
-# PWA 로 설치돼야 Window Controls Overlay(= WezTerm 의 INTEGRATED_BUTTONS)를 쓸 수 있다.
-# 둘 다 **루트 경로로 서빙해야** 한다 — /static 아래 두면 서비스워커의 scope 가
-# /static 으로 좁아져 앱 전체를 관장하지 못하고, 설치 요건도 충족되지 않는다.
+# You need an installed PWA to get Window Controls Overlay (= WezTerm's INTEGRATED_BUTTONS).
+# Both must be served from the ROOT path - putting them under /static narrows the service worker's
+# scope to /static, so it can't govern the whole app and the install criteria aren't met.
 @app.get("/manifest.webmanifest")
 async def manifest():
     return FileResponse(os.path.join(STATIC, "manifest.webmanifest"),
@@ -242,30 +243,29 @@ async def service_worker():
 
 @app.get("/api/clipboard")
 async def api_clipboard():
-    r"""⭐ PC 클립보드를 읽어 **붙여넣을 문자열**로 돌려준다(이미지면 PNG 로 저장한 뒤 그 경로).
+    r"""Read the PC clipboard and return a string to paste (for an image, save a PNG and return its path).
 
-    동봉된 `scripts/clipboard_paste.ps1` 을 부른다 — 이미지면 `%TEMP%\wezterm_clip\clip_*.png` 로
-    저장하고 그 경로를, 파일 드롭이면 경로들을, 텍스트면 텍스트를 돌려준다.
+    Calls the bundled `scripts/clipboard_paste.ps1` - for an image it saves to
+    `%TEMP%\wezterm_clip\clip_*.png` and returns that path; for a file drop, the paths; for text, the text.
 
-    ⚠ 왜 브라우저가 아니라 서버가 읽는가:
-      · 웹 페이지는 **이미지 바이트를 터미널로 흘려보낼 수 없다.**
-      · claude 는 `Ctrl+V`(0x16)를 받으면 자기가 클립보드를 읽지만
-        (`powershell -Sta ... Clipboard::ContainsImage()`), webterm PTY 안에서는 그 경로가 안 통했다.
-      · WezTerm 이 이미 **경로를 붙여넣는 방식**으로 풀어둔 문제라, 같은 해법을 쓴다.
-        claude 는 경로를 받으면 그 파일을 읽는다.
+    Why the server reads it, not the browser:
+      - A web page CANNOT stream image bytes into the terminal.
+      - claude, on Ctrl+V (0x16), reads the clipboard itself
+        (`powershell -Sta ... Clipboard::ContainsImage()`), but that path didn't work inside the webterm PTY.
+      - WezTerm already solved this by pasting a PATH, so we do the same. claude, given a path, reads the file.
 
-    ⚠ `-Sta` 는 필수다 — `System.Windows.Forms.Clipboard` 는 STA 스레드에서만 동작한다.
+    `-Sta` is required - `System.Windows.Forms.Clipboard` only works on an STA thread.
     """
-    # 저장소에 동봉된 스크립트를 쓴다. (예전 설치본 호환을 위해 홈 경로도 한 번 본다)
+    # Use the bundled script. (Also check the home path once, for compatibility with older installs.)
     script = os.path.join(BASE, "scripts", "clipboard_paste.ps1")
     if not os.path.exists(script):
         script = os.path.join(os.path.expanduser("~"), ".claude", "scripts",
                               "clipboard_paste.ps1")
     if not os.path.exists(script):
-        return UTF8JSONResponse({"ok": False, "error": "clipboard_paste.ps1 없음: " + script},
+        return UTF8JSONResponse({"ok": False, "error": "clipboard_paste.ps1 not found: " + script},
                                 status_code=404)
     try:
-        # ⚠ 블로킹 호출(≈300ms)이라 스레드로 뺀다 — 이벤트 루프를 잡으면 다른 pane 의 출력이 멎는다.
+        # Blocking call (~300ms), so run it in a thread - holding the event loop stalls other panes' output.
         def run():
             return subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass",
@@ -277,22 +277,22 @@ async def api_clipboard():
         text = r.stdout.decode("utf-8", "replace")
         return {"ok": True, "text": text}
     except Exception as e:
-        log.info("clipboard 읽기 실패: %s", e)
+        log.info("clipboard read failed: %s", e)
         return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-# ── 파일 업로드 (폰 → PC) ────────────────────────────────────
-# 폰에서 고른 파일을 PC 임시폴더에 받아 **그 경로**를 돌려준다. 프론트가 그 경로를
-# pane 에 bracketed paste 하면 claude 가 파일을 읽는다 — 클립보드 이미지(`/api/clipboard`)가
-# 쓰는 것과 **같은 수법**이다(웹 페이지는 바이트를 터미널로 흘려보낼 수 없으므로 경로로 우회).
+# -- File upload (phone -> PC) -------------------------------
+# Receive a file the phone picked into a PC temp folder and return ITS PATH. The front end
+# bracketed-pastes that path into a pane and claude reads the file - the SAME trick the clipboard
+# image (`/api/clipboard`) uses (a web page can't stream bytes into the terminal, so route via a path).
 #
-# ⚠ wezterm-web 의 `/api/upload` 는 base64 JSON + 이미지 확장자 화이트리스트였다.
-#   여기서는 `python-multipart` 가 있으니 **multipart 스트리밍**으로 받는다 —
-#   base64 는 33% 부풀고 메모리에 통째로 올라가서 폰 사진 몇 장이면 바로 아프다.
+# wezterm-web's /api/upload was base64 JSON + an image-extension whitelist. Here python-multipart
+# is available, so we receive as a MULTIPART STREAM - base64 inflates 33% and loads fully into memory,
+# which hurts immediately with a few phone photos.
 UPLOAD_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp",
                           "webterm_uploads")
-UPLOAD_MAX = 200 * 1024 * 1024      # 파일 하나당 상한 200MB (폰 동영상까지는 받아주는 선)
-UPLOAD_TTL = 86400                  # 1일 지난 것은 다음 업로드 때 지운다(디스크 무한 누적 방지)
+UPLOAD_MAX = 200 * 1024 * 1024      # 200MB per file (enough to accept phone videos)
+UPLOAD_TTL = 86400                  # anything older than a day is cleared on the next upload (no unbounded growth)
 
 
 def _upload_cleanup():
@@ -310,13 +310,13 @@ def _upload_cleanup():
 
 
 def _safe_name(name):
-    """파일명을 **경로가 되지 못하게** 깎는다.
+    """Trim a filename so it CAN'T become a path.
 
-    ⚠ 세 가지를 동시에 막는다:
-      ① 경로 탈출 — `../../x`·`C:\\x` 는 basename 으로 잘라낸다.
-      ② Windows 금지문자(`<>:"/\\|?*`)와 제어문자 → `_`
-      ③ **공백** → `_` : 경로를 pane 에 그냥 paste 하므로 공백이 있으면 셸이 인자를 쪼갠다.
-         따옴표로 감싸는 길도 있지만, 그러면 claude 의 경로 인식이 흔들려서 이 편이 안전하다.
+    Blocks three things at once:
+      1. Path escape - `../../x` and `C:\\x` are cut down with basename.
+      2. Windows-forbidden chars (`<>:"/\\|?*`) and control chars -> `_`
+      3. SPACES -> `_`: the path is pasted straight into a pane, so a space makes the shell split args.
+         Quoting is an option, but that confuses claude's path detection, so this is safer.
     """
     name = os.path.basename((name or "").replace("\\", "/").split("/")[-1])
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f\s]', "_", name).strip("._") or "file"
@@ -325,19 +325,19 @@ def _safe_name(name):
 
 @app.post("/api/upload")
 async def api_upload(files: list[UploadFile] = File(...)):
-    """폰에서 고른 파일들을 받아 저장하고 **PC 경로 목록**을 돌려준다."""
+    """Receive the files the phone picked, save them, and return the LIST OF PC PATHS."""
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     _upload_cleanup()
     saved, errors = [], []
     stamp = time.strftime("%Y%m%d_%H%M%S")
     for i, up in enumerate(files or []):
         name = _safe_name(up.filename)
-        # 같은 이름을 두 번 올려도 덮어쓰지 않게 시각+순번을 앞에 붙인다
+        # Prefix time + index so uploading the same name twice doesn't overwrite
         path = os.path.join(UPLOAD_DIR, f"{stamp}_{i}_{name}")
         size = 0
         try:
-            # ⚠ 디스크 쓰기는 블로킹이다 — 이벤트 루프에서 하면 **다른 pane 의 출력이 멎는다**
-            #   (`/api/clipboard` 가 이미 같은 이유로 `to_thread` 를 쓴다).
+            # Disk writes block - doing them on the event loop stalls other panes' output
+            # (/api/clipboard already uses to_thread for the same reason).
             fh = await asyncio.to_thread(open, path, "wb")
             try:
                 while True:
@@ -346,7 +346,7 @@ async def api_upload(files: list[UploadFile] = File(...)):
                         break
                     size += len(chunk)
                     if size > UPLOAD_MAX:
-                        raise ValueError(f"{UPLOAD_MAX // (1024 * 1024)}MB 초과")
+                        raise ValueError(f"exceeds {UPLOAD_MAX // (1024 * 1024)}MB")
                     await asyncio.to_thread(fh.write, chunk)
             finally:
                 await asyncio.to_thread(fh.close)
@@ -357,20 +357,20 @@ async def api_upload(files: list[UploadFile] = File(...)):
                 os.remove(path)
             except OSError:
                 pass
-            log.info("upload 실패 %s: %s", name, e)
+            log.info("upload failed %s: %s", name, e)
             errors.append({"name": name, "error": str(e)})
     if not saved:
-        return UTF8JSONResponse({"ok": False, "error": "저장된 파일 없음", "errors": errors},
+        return UTF8JSONResponse({"ok": False, "error": "no files saved", "errors": errors},
                                 status_code=400)
     return {"ok": True, "files": saved, "errors": errors}
 
 
 @app.post("/api/diag")
 async def api_diag(payload: dict = Body(default=None)):
-    """브라우저가 접속 시 렌더 환경을 한 줄 남긴다(dpr·실제 폰트·셀 크기).
+    """Log one line of the render environment when a browser connects (dpr, actual font, cell size).
 
-    "글자가 흐리다" 는 제보는 데이터가 아니라 렌더 문제라 로그·capture 에 흔적이 안 남는다.
-    추측으로 고치면 멀쩡한 걸 망가뜨리므로(이미 한 번 겪었다) 값을 먼저 본다.
+    A "text looks blurry" report is a render problem, not data, so it leaves no trace in logs/capture.
+    Fixing by guesswork breaks what worked (already happened once), so look at the values first.
     """
     log.info("DIAG %s", json.dumps(payload or {}, ensure_ascii=False))
     return {"ok": True}
@@ -378,10 +378,10 @@ async def api_diag(payload: dict = Body(default=None)):
 
 @app.get("/api/config")
 async def api_config():
-    """프론트가 쓰는 설정만 내준다(허용목록 같은 서버 내부 값은 빼고).
+    """Return only the settings the front end uses (not server-internal values like the allowlist).
 
-    설정 편집은 파일로만 한다 — 쓰기 API 를 두면 브라우저에서 서버 파일을 고칠 수 있게 되고,
-    그건 이 프로그램이 굳이 열어줄 이유가 없는 구멍이다.
+    Config editing is file-only - a write API would let the browser edit server files, a hole this
+    program has no reason to open.
     """
     c = config.load()
     return {"ok": True,
@@ -410,7 +410,7 @@ async def api_create(payload: dict = Body(default=None)):
     return await _ask({
         "op": "create",
         "name": payload.get("name"),
-        # 요청값 → config.json → (데몬에서) WEBTERM_* 환경변수 → 홈
+        # request value -> config.json -> (in the daemon) WEBTERM_* env vars -> home
         "shell": payload.get("shell") or config.load().get("shell") or None,
         "cwd": payload.get("cwd") or config.load().get("defaultCwd") or None,
         "cols": int(payload.get("cols") or 120),
@@ -432,18 +432,18 @@ async def api_rename(sid: str, payload: dict = Body(...)):
 
 @app.post("/api/sessions/{sid}/label")
 async def api_label(sid: str, payload: dict = Body(...)):
-    """pane 개별 이름. rename(탭 이름)과 달리 그룹(탭)에 영향을 주지 않는다."""
+    """A pane's individual name. Unlike rename (tab name), it doesn't affect the group (tab)."""
     try:
         r = await _ask({"op": "label", "sid": sid, "label": payload.get("label", "")})
     except RuntimeError as e:
-        # 이름 충돌은 서버 장애가 아니라 사용자 입력 문제다 → 409 로 구분해 돌려준다
+        # A name clash is a user-input problem, not a server failure -> return 409 to distinguish it
         return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=409)
     return {"ok": r.get("labeled", False)}
 
 
 @app.post("/api/sessions/{sid}/send")
 async def api_send(sid: str, payload: dict = Body(...)):
-    """외부 연동용 — wezterm cli send-text 자리. 프로세스 spawn 없이 PTY 에 바로 쓴다."""
+    """For external callers - the wezterm cli send-text slot. Writes straight to the PTY, no process spawn."""
     try:
         await _write(sid, payload.get("text", ""), bool(payload.get("submit")))
     except ValueError as e:
@@ -453,33 +453,33 @@ async def api_send(sid: str, payload: dict = Body(...)):
     return {"ok": True}
 
 
-# ── 이름으로 pane 지목 (resolve) ──────────────────────────────────────────
-# 외부(스킬·텔레그램·앞으로 만들 wezterm cli shim)가 sid 를 몰라도 pane 을 지목하게 한다.
+# -- Address a pane by name (resolve) --------------------------------------
+# Lets external callers (skills, telegram, a future wezterm cli shim) address a pane without a sid.
 #
-# ⭐ 규칙이 **여기 한 곳에만** 있어야 한다. 예전 사고의 원인이 "부르는 쪽마다 자기 매칭 규칙을
-#    갖고 있던 것"이었다 — tg_daemon 의 `resolve_session` 이 prefix 부분매칭으로
-#    `oracleVpsForRustDesk` 와 `oracleVpsForRustDesk_1` 중 **첫 후보를 말없이 골라** 엉뚱한
-#    세션에 메시지를 넣었다(wiki `pane-name-identity-auto-manual`).
+# The rule must live in ONE place. A past incident came from "each caller having its own matching
+# rule" - tg_daemon's `resolve_session` used prefix partial-matching and silently picked the first
+# candidate between `oracleVpsForRustDesk` and `oracleVpsForRustDesk_1`, sending the message to the
+# wrong session.
 #
-# 그래서 두 가지를 지킨다:
-#   ① **부분 매칭을 하지 않는다** — 정확 일치만. 사람이 안 쓰는 sid 만 접두 매칭을 허용한다.
-#   ② **모호하면 고르지 않는다** — 후보를 그대로 돌려주고 되묻게 한다(409).
+# So two rules:
+#   1. NO partial matching - exact match only. Only the sid (which humans don't type) allows a prefix.
+#   2. On ambiguity, DON'T pick - return the candidates and make the caller re-ask (409).
 #
-# 지목 문법:
-#   "탭:패널"   탭 이름 + pane 이름(label) 또는 pane 번호(1-based, 화면 순서와 같다)
-#   "탭"        그 탭의 pane 이 하나뿐일 때만
-#   "패널"      label 이 전체에서 유일할 때만  (탭이 다르면 같은 label 이 있을 수 있다)
-#   "3-2"       ⭐ **위치 지목** — 3번째 탭의 2번째 pane (사람이 화면을 보고 말하는 방식)
-#   "3"         3번째 탭 (그 탭의 pane 이 하나뿐일 때만)
-#   "<sid>"     sid 또는 그 접두
+# Target syntax:
+#   "tab:pane"  tab name + pane name (label) or pane number (1-based, same as screen order)
+#   "tab"       only when the tab has a single pane
+#   "pane"      only when the label is unique across everything (different tabs may share a label)
+#   "3-2"       positional - the 2nd pane of the 3rd tab (how a human names it looking at the screen)
+#   "3"         the 3rd tab (only when it has a single pane)
+#   "<sid>"     a sid or its prefix
 #
-# ⭐ 위치 지목을 넣은 이유: 사용자는 이름을 외우지 않고 **보이는 순서**로 부른다("3-2 에 보내줘").
-#    예전에는 그 형식이 없어서 부르는 쪽이 "3-1 추정" 같은 짐작을 했다 — 규칙이 없으면
-#    호출자가 자기 규칙을 만들고, 그게 곧 엉뚱한 세션에 명령이 들어가는 사고가 된다.
-# ⚠ 순서가 중요하다: **이름 일치가 항상 먼저**다(탭 label 이 "3" 이거나 탭 이름이 "3-2" 일 수 있다).
-#    또 sid 접두 매칭보다도 앞에 둔다 — 한 자리 숫자는 16진수 sid 접두에 걸리기 쉽다.
+# Why positional: users don't memorize names, they call by VISIBLE order ("send to 3-2"). Without
+# that form, callers guessed like "assume 3-1" - no rule means the caller invents one, which becomes
+# a command landing in the wrong session.
+# Order matters: a NAME match always comes first (a tab's label could be "3", a tab name could be
+# "3-2"). It also comes before sid-prefix matching - a single digit easily catches a hex sid prefix.
 def _match(sessions, target):
-    """반환: (session, None) | (None, 후보목록)"""
+    """Returns: (session, None) | (None, candidate_list)"""
     alive = [s for s in sessions if s.get("alive")]
     t = (target or "").strip()
     if not t:
@@ -496,16 +496,16 @@ def _match(sessions, target):
     if ":" in t:
         tab, _, pane = t.partition(":")
         tab, pane = tab.strip(), pane.strip()
-        # "탭" 이 비어 있으면(":이름") 전체에서 label 을 찾는다
+        # If "tab" is empty (":name"), search for the label across everything
         group = [s for s in alive if s["name"] == tab] if tab else alive
         if not group:
             return None, []
-        if pane.isdigit():          # 번호는 그 탭 안에서의 순서 — 목록 순서가 곧 화면 번호다
+        if pane.isdigit():          # the number is order within that tab - list order IS the screen number
             i = int(pane) - 1
             return (group[i], None) if 0 <= i < len(group) else (None, [])
         return pick([s for s in group if s.get("label", "") == pane])
 
-    # 접두사 없는 한 덩어리 — 탭 → label → 위치 → sid 순으로 시도한다
+    # A single token with no separator - try tab -> label -> position -> sid
     by_tab = [s for s in alive if s["name"] == t]
     if by_tab:
         return pick(by_tab)
@@ -513,10 +513,10 @@ def _match(sessions, target):
     if by_label:
         return pick(by_label)
 
-    # ⭐ 위치 지목 "3-2"(3번 탭 2번째 pane) / "3"(3번 탭)
-    #   탭 순서는 **세션 목록에 처음 등장한 순서** — 브라우저 탭바가 그리는 순서와 같은 규칙이다
-    #   (app.js: `[...new Set(sessions.map(s => s.name))]`). 두 곳이 어긋나면 사용자가 보는
-    #   번호와 우리가 세는 번호가 달라지므로, 규칙을 그대로 베낀다.
+    # Positional "3-2" (2nd pane of tab 3) / "3" (tab 3)
+    #   Tab order is FIRST-APPEARANCE order in the session list - the same rule the browser tab bar
+    #   draws (app.js: `[...new Set(sessions.map(s => s.name))]`). If the two diverge, the user's
+    #   number and ours diverge, so copy the rule exactly.
     def tab_order():
         names = []
         for s in alive:
@@ -532,7 +532,7 @@ def _match(sessions, target):
             return None, []
         group = [s for s in alive if s["name"] == names[ti]]
         if not m:
-            return pick(group)               # "3" — pane 이 여럿이면 후보를 돌려준다(409)
+            return pick(group)               # "3" - if multiple panes, return candidates (409)
         pi = int(m.group(2)) - 1
         return (group[pi], None) if 0 <= pi < len(group) else (None, [])
 
@@ -543,35 +543,35 @@ def _match(sessions, target):
 
 
 async def _resolve(target):
-    """target → 세션. 못 찾으면 404, 모호하면 409 를 담은 JSONResponse 를 함께 돌려준다."""
+    """target -> session. On miss, returns a JSONResponse with 404; on ambiguity, one with 409."""
     r = await _ask({"op": "list"})
     s, cands = _match(r.get("sessions", []), target)
     if s:
         return s, None
     if cands:
         return None, UTF8JSONResponse(
-            {"ok": False, "error": f"'{target}' 이(가) 여러 pane 에 해당합니다 — 탭:패널 로 지목하세요",
+            {"ok": False, "error": f"'{target}' matches multiple panes - address it as tab:pane",
              "candidates": cands}, status_code=409)
     return None, UTF8JSONResponse(
-        {"ok": False, "error": f"'{target}' 에 해당하는 pane 이 없습니다"}, status_code=404)
+        {"ok": False, "error": f"no pane matches '{target}'"}, status_code=404)
 
 
-# ── 탭 / 패널 단위 API ────────────────────────────────────────────────────
-# 브라우저는 sid 로 조작하지만(위쪽 라우트), 외부(스킬·CLI)는 sid 를 모른다.
-# "탭"은 서버에 실체가 없고 **같은 name 을 가진 세션들의 묶음**이라, 그 묶음 연산을
-# 여기 한 곳에 둔다 — 부르는 쪽마다 for 문을 돌리면 규칙이 흩어진다.
-# 탭 이름 규칙 — 생성과 변경이 **같은 규칙**을 써야 한다(한쪽만 막으면 다른 쪽으로 들어온다).
-#   ':'  → 지목 문법(`탭:패널`)과 충돌
-#   '/' '\' → URL 경로에 탭 이름이 들어가므로 경로 구분자로 오해된다
+# -- Tab / pane API --------------------------------------------------------
+# The browser operates by sid (routes above), but external callers (skills, CLI) don't know the sid.
+# A "tab" has no real existence on the server - it's the GROUP of sessions sharing a name - so the
+# group operations live here in one place (a for-loop per caller scatters the rule).
+# Tab-name rules - create and rename must use the SAME rule (guard one side only and it comes in the other).
+#   ':'    -> collides with the address syntax (`tab:pane`)
+#   '/' '\' -> the tab name goes into the URL path, mistaken for a path separator
 _BAD_TAB_CHARS = re.compile(r"[:/\\]")
 
 
 def _bad_tab_name(name):
-    """문제가 있으면 사유 문자열, 없으면 None."""
+    """A reason string if there's a problem, else None."""
     if not name:
-        return "탭 이름이 필요합니다"
+        return "a tab name is required"
     if _BAD_TAB_CHARS.search(name):
-        return "탭 이름에 : / \\ 는 쓸 수 없습니다"
+        return "a tab name can't contain : / \\"
     return None
 
 
@@ -586,8 +586,8 @@ def _tab_panes(sessions, name):
 def _tab_view(sessions, name, i=None):
     ps = _tab_panes(sessions, name)
     return {
-        # ⭐ `i` = 탭 번호(1-based). 이걸 안 보여주면 부르는 쪽이 "3-2" 로 지목할 근거가 없다
-        #   (번호는 보이는데 목록에는 없으니 짐작하게 된다).
+        # `i` = tab number (1-based). Without it the caller has no basis to address "3-2"
+        #   (the number is visible but not in the list, so they'd guess).
         "i": i,
         "tab": name,
         "panes": [{"n": i + 1, "sid": s["sid"], "label": s.get("label", ""),
@@ -598,7 +598,7 @@ def _tab_view(sessions, name, i=None):
 
 @app.get("/api/tabs")
 async def api_tabs():
-    """탭 단위로 본 목록. pane 번호(n)는 화면에 보이는 번호와 같다."""
+    """The list viewed by tab. The pane number (n) is the same as the visible number."""
     ss = await _sessions()
     names = []
     for s in ss:
@@ -609,11 +609,11 @@ async def api_tabs():
 
 @app.post("/api/tabs")
 async def api_tab_create(payload: dict = Body(...)):
-    """탭을 만든다(= 그 이름의 첫 pane 을 띄운다).
+    """Create a tab (= start the first pane with that name).
 
-    ⚠ 같은 이름이 이미 있으면 **거부**한다. 이름이 곧 그룹 키라서, 말없이 만들면
-      새 탭이 아니라 기존 탭의 pane 이 하나 늘어난 것이 된다 — 부른 쪽 의도와 다르다.
-      기존 탭에 pane 을 더하려면 POST /api/panes 를 쓴다.
+    If the name already exists, REFUSE. The name is the group key, so creating silently would add a
+    pane to the existing tab, not make a new tab - not what the caller meant. To add a pane to an
+    existing tab, use POST /api/panes.
     """
     name = (payload.get("name") or "").strip()
     bad = _bad_tab_name(name)
@@ -621,7 +621,7 @@ async def api_tab_create(payload: dict = Body(...)):
         return UTF8JSONResponse({"ok": False, "error": bad}, status_code=400)
     ss = await _sessions()
     if _tab_panes(ss, name):
-        return UTF8JSONResponse({"ok": False, "error": f"'{name}' 탭이 이미 있습니다"}, status_code=409)
+        return UTF8JSONResponse({"ok": False, "error": f"tab '{name}' already exists"}, status_code=409)
     r = await _ask({"op": "create", "name": name, "cwd": payload.get("cwd"),
                     "cols": int(payload.get("cols") or 120), "rows": int(payload.get("rows") or 30)})
     s = r.get("session", {})
@@ -632,7 +632,7 @@ async def api_tab_create(payload: dict = Body(...)):
 
 @app.post("/api/tabs/{name}/rename")
 async def api_tab_rename(name: str, payload: dict = Body(...)):
-    """탭 이름 변경 — 그 탭의 **모든 pane** 에 한 번에 적용한다."""
+    """Rename a tab - applied to ALL panes of that tab at once."""
     new = (payload.get("name") or "").strip()
     bad = _bad_tab_name(new)
     if bad:
@@ -640,10 +640,10 @@ async def api_tab_rename(name: str, payload: dict = Body(...)):
     ss = await _sessions()
     ps = _tab_panes(ss, name)
     if not ps:
-        return UTF8JSONResponse({"ok": False, "error": f"'{name}' 탭이 없습니다"}, status_code=404)
+        return UTF8JSONResponse({"ok": False, "error": f"no tab '{name}'"}, status_code=404)
     if new != name and _tab_panes(ss, new):
-        # 같은 이름이 되면 두 탭이 합쳐지고 (탭,label) 복합키가 깨질 수 있다 → 미리 막는다
-        return UTF8JSONResponse({"ok": False, "error": f"'{new}' 탭이 이미 있습니다 — 합치기는 지원하지 않습니다"},
+        # Making it the same name merges two tabs and can break the (tab, label) composite key -> prevent it
+        return UTF8JSONResponse({"ok": False, "error": f"tab '{new}' already exists - merging isn't supported"},
                             status_code=409)
     for s in ps:
         await _ask({"op": "rename", "sid": s["sid"], "name": new})
@@ -652,10 +652,10 @@ async def api_tab_rename(name: str, payload: dict = Body(...)):
 
 @app.delete("/api/tabs/{name}")
 async def api_tab_close(name: str):
-    """탭을 닫는다 = 그 탭의 pane 을 전부 종료한다."""
+    """Close a tab = terminate all of its panes."""
     ps = _tab_panes(await _sessions(), name)
     if not ps:
-        return UTF8JSONResponse({"ok": False, "error": f"'{name}' 탭이 없습니다"}, status_code=404)
+        return UTF8JSONResponse({"ok": False, "error": f"no tab '{name}'"}, status_code=404)
     for s in ps:
         await _ask({"op": "kill", "sid": s["sid"]})
     return {"ok": True, "tab": name, "killed": len(ps)}
@@ -663,17 +663,17 @@ async def api_tab_close(name: str):
 
 @app.post("/api/panes")
 async def api_pane_create(payload: dict = Body(...)):
-    """기존 탭에 pane 을 하나 더 만든다(= 분할).
+    """Add one more pane to an existing tab (= split).
 
-    cwd 를 안 주면 **그 탭의 첫 pane 이 있던 폴더를 물려받는다** — 분할의 자연스러운 기대값이다.
+    Without cwd, it INHERITS the folder of the tab's first pane - the natural expectation for a split.
     """
     tab = (payload.get("tab") or "").strip()
     if not tab:
-        return UTF8JSONResponse({"ok": False, "error": "tab 이 필요합니다"}, status_code=400)
+        return UTF8JSONResponse({"ok": False, "error": "tab is required"}, status_code=400)
     ss = await _sessions()
     ps = _tab_panes(ss, tab)
     if not ps:
-        return UTF8JSONResponse({"ok": False, "error": f"'{tab}' 탭이 없습니다 — 먼저 만드세요"},
+        return UTF8JSONResponse({"ok": False, "error": f"no tab '{tab}' - create it first"},
                             status_code=404)
     cwd = payload.get("cwd") or ps[0].get("cwd")
     r = await _ask({"op": "create", "name": tab, "cwd": cwd,
@@ -684,7 +684,7 @@ async def api_pane_create(payload: dict = Body(...)):
         try:
             await _ask({"op": "label", "sid": s["sid"], "label": payload["label"]})
         except RuntimeError as e:
-            # pane 은 이미 생겼다 — 이름만 못 붙였다는 것을 숨기지 않는다
+            # The pane already exists - don't hide that only the naming failed
             return {"ok": True, "tab": tab, "sid": s.get("sid"), "n": len(ps) + 1,
                     "cwd": cwd, "label": "", "warning": str(e)}
     return {"ok": True, "tab": tab, "sid": s.get("sid"), "n": len(ps) + 1,
@@ -693,7 +693,7 @@ async def api_pane_create(payload: dict = Body(...)):
 
 @app.post("/api/panes/label")
 async def api_pane_label(payload: dict = Body(...)):
-    """이름으로 지목해 pane 이름을 붙인다. 빈 값이면 자동으로 되돌린다."""
+    """Address by name and set the pane's name. Empty reverts to auto."""
     s, err = await _resolve(payload.get("target", ""))
     if err:
         return err
@@ -706,7 +706,7 @@ async def api_pane_label(payload: dict = Body(...)):
 
 @app.delete("/api/panes")
 async def api_pane_close(target: str):
-    """이름으로 지목해 pane 하나를 닫는다. 그 탭의 마지막 pane 이면 탭도 사라진다."""
+    """Address by name and close one pane. If it's the tab's last pane, the tab disappears too."""
     s, err = await _resolve(target)
     if err:
         return err
@@ -717,10 +717,10 @@ async def api_pane_close(target: str):
 
 
 async def _pos_of(sid):
-    """지금 이 pane 의 화면 위치 "3-2" 를 계산한다. 못 찾으면 None.
+    """Compute this pane's screen position "3-2". None if not found.
 
-    ⭐ 위치는 **물어볼 때 계산**한다 — 환경변수나 DB 에 박아두면 pane 이 열리고 닫힐 때
-      밀려서 곧 거짓이 된다(그래서 `WEBTERM_SID` 만 박고 위치는 여기서 답한다).
+    Position is computed ON DEMAND - stamped in an env var or DB, it shifts as panes open and close
+    and soon becomes a lie (so we stamp only WEBTERM_SID and answer position here).
     """
     ss = await _sessions()
     alive = [s for s in ss if s.get("alive")]
@@ -737,10 +737,10 @@ async def _pos_of(sid):
 
 @app.get("/api/resolve")
 async def api_resolve(target: str):
-    """보내기 전에 어디로 가는지 확인만 한다(모호하면 후보를 돌려준다).
+    """Just check where a send would go (returns candidates if ambiguous).
 
-    자기 자신을 확인하는 용도(whoami)로도 쓴다 — pane 안에서
-    `GET /api/resolve?target=$env:WEBTERM_SID` 를 부르면 지금 내 탭·label·위치가 돌아온다.
+    Also a whoami - from inside a pane, `GET /api/resolve?target=$env:WEBTERM_SID` returns your
+    current tab, label, and position.
     """
     s, err = await _resolve(target)
     if err:
@@ -751,7 +751,7 @@ async def api_resolve(target: str):
 
 @app.post("/api/send")
 async def api_send_by_name(payload: dict = Body(...)):
-    """이름으로 지목해 텍스트를 넣는다 — 스킬·외부 연동의 정문."""
+    """Address by name and send text - the front door for skills and external callers."""
     s, err = await _resolve(payload.get("target", ""))
     if err:
         return err
@@ -764,15 +764,15 @@ async def api_send_by_name(payload: dict = Body(...)):
     return {"ok": True, "sid": s["sid"], "tab": s["name"], "label": s.get("label", "")}
 
 
-# backlog 는 PTY 가 뱉은 **날것의 스트림**이라 ANSI 제어문자가 섞여 있다.
-# 사람이나 스킬이 읽으려면 벗겨야 한다(wezterm cli get-text 는 그리드를 읽으므로 이미 텍스트였다).
-# ⚠ 한계: 우리는 그리드가 아니라 스트림을 갖고 있어서, 커서를 옮겨 화면을 다시 그리는 TUI(claude 등)는
-#   "지금 화면"이 아니라 "그동안 출력된 것"이 나온다. 셸 출력은 정확하고 TUI 는 근사치다.
+# backlog is the RAW stream the PTY emitted, with ANSI control chars mixed in.
+# It must be stripped for a human or skill to read (wezterm cli get-text read a grid, so it was already text).
+# Limit: we hold a stream, not a grid, so a TUI that redraws by moving the cursor (claude etc.) shows
+#   "what was output over time", not "the current screen". Shell output is accurate; a TUI is approximate.
 _ANSI = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL/ST (창 제목 등)
-    r"|\x1b\[[0-?]*[ -/]*[@-~]"               # CSI (색·커서 이동)
-    r"|\x1b[@-Z\\-_]"                         # 단발 ESC
-    r"|[\x00-\x08\x0b\x0c\x0e-\x1f]"          # 남은 제어문자 (탭·개행은 남긴다)
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL/ST (window title, etc.)
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"               # CSI (color, cursor moves)
+    r"|\x1b[@-Z\\-_]"                         # single ESC
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f]"          # remaining control chars (keep tab/newline)
 )
 
 
@@ -782,9 +782,9 @@ def strip_ansi(text):
 
 @app.get("/api/capture")
 async def api_capture_by_name(target: str, lines: int = 0, raw: int = 0):
-    """이름으로 지목해 화면을 읽는다 — wezterm cli get-text 자리.
+    """Address by name and read the screen - the wezterm cli get-text slot.
 
-    기본은 ANSI 를 벗긴 평문이고, `raw=1` 이면 원본 스트림을 그대로 준다.
+    Default is ANSI-stripped plain text; raw=1 returns the original stream as-is.
     """
     s, err = await _resolve(target)
     if err:
@@ -800,7 +800,7 @@ async def api_capture_by_name(target: str, lines: int = 0, raw: int = 0):
 
 @app.get("/api/sessions/{sid}/capture")
 async def api_capture(sid: str):
-    """외부 연동용 — wezterm cli get-text 자리."""
+    """For external callers - the wezterm cli get-text slot."""
     try:
         r = await _ask({"op": "backlog", "sid": sid})
     except RuntimeError as e:
@@ -808,30 +808,30 @@ async def api_capture(sid: str):
     return {"ok": True, "text": r.get("text", "")}
 
 
-# ── 다중 클라이언트 화면 크기 조정 ────────────────────────────────────────
-# PTY 크기는 하나뿐인데 붙는 기기는 여러 개다(PC 1600px + 폰 412px).
-# 그냥 두면 **마지막에 요청한 쪽으로 계속 뺏겨** PC 화면이 폰 폭으로 쪼그라들고,
-# 서로 리사이즈를 주고받으며 TUI 가 깨진다(실제로 claude 화면이 안 그려지는 사고가 났다).
+# -- Multi-client screen sizing --------------------------------------------
+# The PTY has one size but several devices attach (PC 1600px + phone 412px).
+# Left alone, it keeps getting TAKEN OVER by whoever asked last, so the PC screen shrinks to phone
+# width and they fight over resizes, breaking the TUI (claude really did fail to draw).
 #
-# 정책: **크기를 보고하는 쪽이 주인**이고, 나머지는 그 크기를 받아 그린다.
-#   PC 는 창을 늘리면 터미널도 늘어나야 하므로(WezTerm 과 같게) 보고한 크기를 그대로 적용한다.
-#   폰은 기본적으로 보고하지 않아 PC 화면을 뺏지 않고, `⤢` 로 주인을 가져올 수 있다.
-#   ⚠ 어느 경우든 **모든 클라의 xterm 은 PTY 크기를 따라가야 한다** — 다르면 글자가 겹쳐 그려진다.
+# Policy: WHOEVER REPORTS A SIZE is the owner; the rest receive that size and draw to it.
+#   The PC should grow the terminal when the window grows (like WezTerm), so its reported size applies.
+#   The phone doesn't report by default (so it doesn't steal the PC's screen) and can grab ownership with `⤢`.
+#   Either way, every client's xterm MUST follow the PTY size - a mismatch overlaps characters.
 _client_sizes = {}          # {sid: {client_id: (cols, rows)}}
-_applied_size = {}          # {sid: (cols, rows)} — 마지막으로 데몬에 보낸 값
-_last_report = {}           # {sid: (cols, rows)} — 가장 최근에 보고된 크기(= 현재 주인)
+_applied_size = {}          # {sid: (cols, rows)} - last value sent to the daemon
+_last_report = {}           # {sid: (cols, rows)} - most recently reported size (= current owner)
 
 
 def _best_size(sid):
-    """**마지막으로 보고한 클라의 크기**를 그대로 쓴다.
+    """Use the size of the client that REPORTED LAST, as-is.
 
-    핵심: PC 는 WezTerm 처럼 **창을 늘리면 터미널도 늘어나야** 한다.
-    최소/최대로 조정하면 PC 가 폰 크기에 갇혀 "창을 키워도 안 커지는" 물건이 된다.
+    Key point: like WezTerm, the PC must GROW THE TERMINAL when its window grows.
+    Clamping to a min/max traps the PC at phone size - a thing that "won't grow when you enlarge it".
 
-    충돌은 정책이 아니라 **역할 분리**로 푼다 —
-      · 크기를 보고하는 쪽(주인, 기본은 PC): 자기 창 크기를 그대로 요구
-      · 보고하지 않는 쪽(폰): PTY 크기를 받아서 그린다(가로 스크롤)
-      · `⤢`(force)로 주인을 바꿀 수 있다
+    Conflicts are resolved by ROLE SEPARATION, not policy:
+      - the reporting side (owner, PC by default): asks for its own window size
+      - the non-reporting side (phone): receives the PTY size and draws it (horizontal scroll)
+      - `⤢` (force) can switch ownership
     """
     last = _last_report.get(sid)
     if last:
@@ -840,24 +840,25 @@ def _best_size(sid):
     return next(iter(sizes.values()), None)
 
 
-_forced_size = {}           # {sid: (cols, rows)} — 특정 클라가 "내 화면에 맞춰" 라고 요구한 경우
-_forced_by = {}             # {sid: cid} — 그 강제를 건 **브라우저**(소켓이 아니다)
-_force_gone = {}            # {sid: monotonic} — 주인이 안 보이기 시작한 시각
-FORCE_GRACE = 90            # 초. 이만큼 안 돌아오면 강제를 버린다
+_forced_size = {}           # {sid: (cols, rows)} - a client demanded "fit to my screen"
+_forced_by = {}             # {sid: cid} - the BROWSER that set the force (not the socket)
+_force_gone = {}            # {sid: monotonic} - when the owner started being absent
+FORCE_GRACE = 90            # seconds. drop the force if absent this long
 
 
 def _live_force(sid):
-    """⭐ 강제 크기는 **건 브라우저가 살아 있는 동안만** 유효하다.
+    """A forced size holds only while the browser that set it is alive.
 
-    ⚠ 사고 기록 ①(2026-08-23): 해제가 `⤢` 를 **다시 누를 때만** 왔다. 폰에서 켠 채 브라우저를
-    닫으면 해제 신호가 영영 안 와서 `_forced_size` 가 남고, **PC 로 돌아와도 폰 크기(51x30)에
-    갇혔다.** 게다가 `_applied_size` 와 같아 resize 호출조차 없어 로그에 흔적도 안 남았다.
+    Incident 1 (2026-08-23): the release only came on pressing `⤢` AGAIN. Close the browser with it on
+    from a phone and the release never came, so `_forced_size` lingered and the PC stayed trapped at
+    phone size (51x30). Worse, it equaled `_applied_size`, so there wasn't even a resize call - no log trace.
 
-    ⚠ 사고 기록 ②(2026-08-24): 그래서 "소켓이 끊기면 즉시 해제"로 고쳤더니 이번엔 반대로 샜다 —
-    **폰은 화면을 끄거나 앱을 전환하기만 해도 WS 가 끊겼다 붙는다.** 그때마다 주인 자격이
-    날아가 PTY 가 PC 크기로 튀었고, 폰은 그 큰 크기를 그대로 그려 **statusline 이 잘렸다.**
-    → 판정 기준을 **소켓(`id(ws)`) 이 아니라 브라우저(`cid`)** 로 올리고, 그마저도
-      `FORCE_GRACE` 만큼 유예한다. 잠깐의 끊김은 견디고 진짜 떠난 경우만 해제한다.
+    Incident 2 (2026-08-24): so we changed it to "release the moment the socket drops", and it leaked
+    the other way - a phone reconnects its WS just from turning off the screen or app-switching. Each
+    time, ownership was lost and the PTY jumped to PC size, which the phone then drew, cutting off the
+    statusline.
+    -> Base the judgment on the BROWSER (cid), not the socket (id(ws)), and even then grant a
+       FORCE_GRACE period. Tolerate brief drops; release only on a real departure.
     """
     owner = _forced_by.get(sid)
     if owner is None:
@@ -869,22 +870,22 @@ def _live_force(sid):
     gone_at = _force_gone.get(sid)
     if gone_at is None:
         _force_gone[sid] = time.monotonic()
-        return _forced_size.get(sid)          # 방금 끊긴 것 — 아직 주인으로 대우한다
+        return _forced_size.get(sid)          # just dropped - still treat as owner
     if time.monotonic() - gone_at < FORCE_GRACE:
         return _forced_size.get(sid)
     _forced_size.pop(sid, None)
     _forced_by.pop(sid, None)
     _force_gone.pop(sid, None)
-    log.info("force 자동해제 sid=%s (주인이 %d초 넘게 안 돌아옴)", sid, FORCE_GRACE)
+    log.info("force auto-released sid=%s (owner absent > %ds)", sid, FORCE_GRACE)
     return None
 
 
 async def _sync_size(sid, att, force=None, owner=None):
-    """PTY 크기를 정한다.
+    """Decide the PTY size.
 
-    기본은 **마지막으로 보고한 클라의 크기**(보통 PC 창 크기).
-    `⤢` 로 force 를 걸면 그 크기가 고정되어 다른 클라의 보고를 무시한다.
-    단 그 고정은 **건 클라가 살아 있는 동안만**이다(`_live_force`).
+    Default is the size of the client that reported last (usually the PC window).
+    Setting force via `⤢` pins that size and ignores other clients' reports.
+    That pin holds only while the setting client is alive (`_live_force`).
     """
     if force:
         _forced_size[sid] = force
@@ -894,12 +895,12 @@ async def _sync_size(sid, att, force=None, owner=None):
     if target and _applied_size.get(sid) != target:
         _applied_size[sid] = target
         await att.resize(target[0], target[1])
-        # ⚠ **누가 이 크기를 요구했는지** 함께 남긴다. 여러 클라가 붙으면 "마지막 보고자가 주인"
-        #   규칙 때문에 서로 크기를 뺏는데, 범인을 모르면 추측만 쌓인다(2026-08-24).
+        # Log WHO asked for this size. With several clients, "last reporter is owner" makes them steal
+        #   from each other; without the culprit you just pile up guesses (2026-08-24).
         who = ", ".join(sorted({c for c, _ in (_client_sizes.get(sid) or {})}))
-        log.info("resize sid=%s → %dx%d (%s) 요구=%s 붙은클라=[%s]",
+        log.info("resize sid=%s -> %dx%d (%s) requested_by=%s attached=[%s]",
                  sid, target[0], target[1],
-                 "강제" if _forced_size.get(sid) else "보고자 기준",
+                 "forced" if _forced_size.get(sid) else "reporter",
                  owner or "-", who)
 
 
@@ -907,21 +908,21 @@ async def _sync_size(sid, att, force=None, owner=None):
 async def ws_term(ws: WebSocket, sid: str):
     await ws.accept()
     att = dc.Attach(sid)
-    # 소켓이 아니라 **브라우저**를 신원으로 쓴다(`_live_force` 참조). 소켓 id 는 같은 브라우저가
-    # 재연결하며 잠시 두 개 겹칠 수 있어 정리용으로만 함께 묶는다.
+    # Identity is the BROWSER, not the socket (see `_live_force`). The socket id is bundled in only for
+    # cleanup, since the same browser can briefly overlap two while reconnecting.
     cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
     client_id = (cid, id(ws))
     try:
         await att.open()
     except Exception as e:
-        log.info("attach 실패 sid=%s: %s", sid, e)
+        log.info("attach failed sid=%s: %s", sid, e)
         await ws.close(code=4004, reason="no such session")
         return
 
     log.info("ws attach sid=%s", sid)
 
     async def pump_out():
-        """데몬 → 브라우저"""
+        """daemon -> browser"""
         async for kind, data in att.events():
             if kind == "end":
                 await ws.close(code=4000, reason="session ended")
@@ -942,8 +943,8 @@ async def ws_term(ws: WebSocket, sid: str):
             elif t == "r":
                 size = (int(msg.get("c", 120)), int(msg.get("r", 30)))
                 _client_sizes.setdefault(sid, {})[client_id] = size
-                _last_report[sid] = size          # 가장 최근 보고자가 크기의 주인
-                # force=true 면 "내 화면에 맞춰" — 다른 클라가 보고해도 이 크기를 유지한다
+                _last_report[sid] = size          # the most recent reporter owns the size
+                # force=true means "fit to my screen" - keep this size even when others report
                 await _sync_size(sid, att,
                                  force=size if msg.get("force") else None,
                                  owner=cid)
@@ -953,15 +954,15 @@ async def ws_term(ws: WebSocket, sid: str):
                 _force_gone.pop(sid, None)
                 await _sync_size(sid, att)
             elif t == "ping":
-                await ws.send_text("")   # 지연 측정용 에코(빈 문자열은 화면에 안 그려진다)
+                await ws.send_text("")   # latency-measuring echo (an empty string isn't drawn)
     except WebSocketDisconnect:
         pass
     except Exception as e:
         log.info("ws error sid=%s: %s", sid, e)
     finally:
         out_task.cancel()
-        # 이 클라가 빠졌으니 크기를 재계산한다(폰이 나가면 PC 크기로 되돌아온다).
-        # 남은 클라가 있을 때만 반영 — 아무도 없으면 PTY 크기를 건드리지 않는다.
+        # This client left, so recompute the size (when the phone leaves, revert to PC size).
+        # Apply only if clients remain - if nobody's left, don't touch the PTY size.
         (_client_sizes.get(sid) or {}).pop(client_id, None)
         if _client_sizes.get(sid):
             try:
@@ -971,12 +972,12 @@ async def ws_term(ws: WebSocket, sid: str):
         else:
             _client_sizes.pop(sid, None)
             _last_report.pop(sid, None)
-            # 아무도 안 남았으면 강제도 함께 버린다 — 다음에 붙는 클라가 자기 크기를 가져간다
+            # Nobody left -> drop the force too, so the next client takes its own size
             _forced_size.pop(sid, None)
             _forced_by.pop(sid, None)
             _force_gone.pop(sid, None)
         att.close()
-        log.info("ws detach sid=%s (세션은 데몬에 그대로 살아있음)", sid)
+        log.info("ws detach sid=%s (session stays alive in the daemon)", sid)
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
