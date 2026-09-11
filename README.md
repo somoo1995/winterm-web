@@ -1,82 +1,83 @@
 # winterm-web
 
-**Windows 셸을 브라우저에서 쓰는 터미널.** ConPTY 를 직접 쥐고 WebSocket 으로 흘려보내기 때문에
-화면을 긁어오는 미러가 아니라 **진짜 터미널**이다 — TUI 도, 자동완성도, 컬러도 그대로 동작한다.
-PC 에서 열어둔 그 셸에 폰으로 붙어 이어서 칠 수 있다.
+**A Windows shell in your browser — a real terminal, not a screen scraper.**
+It holds the ConPTY directly and streams it over a WebSocket, so TUIs, tab-completion,
+and colors all work exactly as they would in a native terminal. Open a shell on your PC,
+then pick it up from your phone and keep typing in the same session.
 
-> 실행 파일·로그·API 는 초기 개발명인 `webterm` 을 그대로 쓴다.
+> The executable, logs, and API keep the original working name `webterm`.
 
 ---
 
-## 요구사항
+## Requirements
 
-- **Windows 10 1809+ / 11** — ConPTY 가 필요하다. 다른 OS 는 지원하지 않는다
-- **Python 3.12 권장** (3.10+ 면 동작한다). 유일한 네이티브 의존성인 `pywinpty` 의
-  휠이 준비된 버전을 쓰는 편이 안전하다 — 너무 최신 파이썬은 소스 빌드로 넘어갈 수 있다
-- 브라우저: Chrome / Edge 계열 권장 (PWA 설치와 Window Controls Overlay 를 쓴다)
+- **Windows 10 1809+ / 11** — ConPTY is required. No other OS is supported.
+- **Python 3.12 recommended** (3.10+ works). The only native dependency is `pywinpty`;
+  stick to a version that ships a prebuilt wheel — a too-new Python may fall back to a source build.
+- Browser: Chrome / Edge family recommended (used for PWA install and Window Controls Overlay).
 
-> 새 venv 에 `pip install -r requirements.txt` 로 받은 최신 조합
-> (fastapi 0.141 / starlette 1.6 / anyio 4.15 / websockets 17 / pywinpty 3.0)에서
-> 기동·셸 실행·WebSocket 까지 동작을 확인했다.
+> Verified on a fresh venv with the current dependency set
+> (fastapi 0.141 / starlette 1.6 / anyio 4.15 / websockets 17 / pywinpty 3.0):
+> startup, shell execution, and WebSocket all work.
 
-## 설치
+## Install
 
-### 원클릭 설치 (권장)
+### One-click (recommended)
 
-**[webterm-setup.bat 다운로드](https://raw.githubusercontent.com/somoo1995/winterm-web/main/webterm-setup.bat)**
-← 우클릭 → "다른 이름으로 저장" 후 **더블클릭**. 그게 전부다.
+**[Download webterm-setup.bat](https://raw.githubusercontent.com/somoo1995/winterm-web/main/webterm-setup.bat)**
+→ right-click, "Save link as", then **double-click** it. That's all.
 
-이 파일 하나가 알아서 한다:
+This single file does everything:
 
-1. GitHub 에서 소스를 내려받아 `%LOCALAPPDATA%\winterm-web` 에 푼다
-2. 파이썬이 없으면 winget 으로 3.12 를 설치한다
-3. 의존성을 설치한다
-4. **자동시작 등록 여부를 물어본다** (`y` 한 글자면 등록)
-5. 서버를 띄우고 브라우저를 연다
+1. Downloads the source from GitHub into `%LOCALAPPDATA%\winterm-web`
+2. Installs Python 3.12 via winget if it's missing
+3. Installs the dependencies
+4. **Asks whether to enable autostart on logon** (one keystroke: `y`)
+5. Starts the server and opens the browser
 
-설치가 끝나면 **바탕화면에 `winterm-web` 바로가기**가 생긴다. 서버가 꺼져 있으면
-알아서 띄우고 브라우저를 열어주므로, 자동시작을 안 걸어도 이걸로 쓰면 된다.
+When it finishes, a **`winterm-web` shortcut** is placed on your Desktop. It starts the
+server if it isn't running and opens the browser, so you can use it that way even without autostart.
 
-묻지 않고 자동시작까지 한 번에 하려면 `cmd` 에서:
+To run unattended (no prompt) and enable autostart in one go, from `cmd`:
 
 ```
 webterm-setup.bat -Autostart
 ```
 
-| 필요한 것 | |
+| Needs | |
 | --- | --- |
-| OS | Windows 10 1803+ / 11 (`curl`·`tar` 내장 버전) |
-| 권한 | **관리자 불필요** — 전부 사용자 영역에 설치 |
-| 그 외 | 없음. 파이썬도 설치기가 깐다 |
+| OS | Windows 10 1803+ / 11 (bundled `curl`/`tar`) |
+| Privileges | **No admin required** — everything installs per-user |
+| Anything else | No. The installer sets up Python too |
 
-설치 위치를 바꾸려면 `cmd` 에서 `set WINTERM_DEST=D:pps\winterm-web` 후 실행.
+To change the install location, from `cmd`: `set WINTERM_DEST=D:\apps\winterm-web` then run it.
 
-제거는 설치 폴더의 **`uninstall.bat`** — 자동시작과 바로가기를 해제하고 서버를 멈춘다.
-폴더를 지우면 완전히 사라진다.
+To remove: run **`uninstall.bat`** in the install folder — it clears autostart and the
+shortcut and stops the server. Delete the folder to remove it completely.
 
-> `.exe`/`.msi` 가 아니라 `.bat` 인 이유: 서명 안 된 설치 파일은 SmartScreen 이
-> "알 수 없는 게시자"로 막고(코드서명 인증서는 유료), `.ps1` 은 PowerShell 실행 정책에
-> 막힌다. `.bat` 은 둘 다 해당이 없다.
+> **Why `.bat` and not `.exe`/`.msi`:** an unsigned installer trips SmartScreen's
+> "unknown publisher" warning (a code-signing certificate costs money), and a `.ps1` is
+> blocked by PowerShell's execution policy. A `.bat` avoids both.
 
-### 이미 받아둔 폴더에서 설치
+### From a folder you already have
 
-저장소를 clone 했거나 ZIP 을 풀어둔 상태라면 그 안의 **`install.bat` 을 더블클릭**하면 된다.
-`webterm-setup.bat` 이 마지막에 부르는 것과 같은 설치기다.
+If you cloned the repo or unzipped it, just double-click **`install.bat`** inside it —
+it's the same installer `webterm-setup.bat` calls at the end.
 
 ```
-install.bat -Autostart      # 묻지 않고 자동시작까지
-install.bat -NoAutostart    # 자동시작 없이
-install.bat -NoStart        # 설치만 하고 안 띄움
-install.bat -NoShortcut     # 바탕화면 바로가기 없이
+install.bat -Autostart      # enable autostart without asking
+install.bat -NoAutostart    # skip autostart
+install.bat -NoStart        # install only, don't launch
+install.bat -NoShortcut     # no Desktop shortcut
 ```
 
-### 수동 설치
+### Manual
 
-설치기가 뭘 하는지 직접 보고 싶거나 막혔을 때.
+If you want to see exactly what the installer does, or you got stuck.
 
 ```powershell
-python --version                  # 3.12.x 가 아니면 아래로
-winget install Python.Python.3.12 # 설치 후 PowerShell 창을 새로 연다
+python --version                  # if not 3.12.x, install below
+winget install Python.Python.3.12 # then open a NEW PowerShell window
 ```
 
 ```powershell
@@ -86,203 +87,208 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 python -m pip install -r requirements.txt
 ```
 
-`Set-ExecutionPolicy` 는 처음 한 번만. 기본값 `Restricted` 에서는 `start.ps1` 이 안 돈다.
-관리자 권한은 필요 없다.
+`Set-ExecutionPolicy` is a one-time step. Under the default `Restricted` policy,
+`start.ps1` won't run. No admin required.
 
-`pip` 가 아니라 `python -m pip` 인 이유: `pip.exe` 는 `Scripts\` 라는 **별도 PATH 항목**에
-있어 python 만 잡히고 pip 는 빠지는 경우가 흔하다. `python -m pip` 는 PATH 를 안 탄다.
+Use `python -m pip`, not `pip`: `pip.exe` lives in `Scripts\`, a **separate PATH entry**
+that's often left out even when `python` is on PATH. `python -m pip` doesn't rely on PATH.
 
-### 자동시작만 따로 걸기
+### Autostart only
 
 ```powershell
 .\install.bat -Autostart -NoStart
 ```
 
-로그온 30초 뒤 창 없이(`--no-browser`) 뜬다. 예약작업 이름은 `WebtermServer` 이고,
-`uninstall.bat` 으로 해제한다.
+Launches on logon after a 30-second delay, windowless (`--no-browser`). The scheduled
+task (or Startup-folder shortcut, when a task can't be registered without admin) is named
+`WebtermServer`; remove it with `uninstall.bat`.
 
-## ⚠ 보안 — 먼저 읽을 것
+## ⚠ Security — read this first
 
-**이 프로그램은 브라우저에게 셸을 준다. 접근할 수 있는 사람은 당신 계정으로 무엇이든 실행할 수 있다.**
+**This program hands a shell to the browser. Anyone who can reach it can run anything as you.**
 
-접근 통제는 **네트워크에 맡기는 설계**다. 로그인 화면도 토큰도 없다.
+Access control is delegated to the network by design. There is no login screen and no token.
 
-- 기본 바인딩은 `127.0.0.1` 이다 — 그 PC 밖에서는 아예 도달하지 않는다
-- 폰이나 다른 기기에서 쓰려면 **Tailscale 같은 사설망 위에 올린다.** tailnet 밖에서는
-  도달 자체가 안 되므로 그것이 인증 역할을 한다
-- **`WEBTERM_HOST` 를 `0.0.0.0` 으로 바꾸지 말 것.** 공용 인터넷이나 회사 LAN 에 그대로 열면
-  인증 없는 원격 셸이 된다
+- Default binding is `127.0.0.1` — unreachable from outside that PC.
+- To use it from a phone or another device, put it behind a **private network like
+  Tailscale**. Being unreachable outside the tailnet is what serves as authentication.
+- **Do not set `WEBTERM_HOST` to `0.0.0.0`.** Exposing it on the public internet or an
+  office LAN turns it into an unauthenticated remote shell.
 
-### 사설망으로 막을 수 없는 것 — 그래서 코드로 막았다
+### What a private network can't stop — so the code does
 
-당신 **자신의 브라우저**가 loopback 으로 때리는 공격은 공격자가 tailnet 안에 있을 필요가 없다.
-VPN 이 관여하지 못하는 경로라 서버가 직접 봐야 한다. 격리 인스턴스에서 실측한 결과:
+An attack from **your own browser** hitting loopback doesn't require the attacker to be
+inside your tailnet, so a VPN can't help; the server has to reject it directly. Measured
+on an isolated instance:
 
-| 공격 | 가드 이전 | 현재 |
+| Attack | Before the guard | Now |
 | --- | --- | --- |
-| `Host` 위조(DNS 리바인딩) → `/api/sessions` 로 sid 획득 | 200, sid 유출 | **403** |
-| 교차출처 WebSocket `/ws/{sid}` | 수락, 셸 읽기·쓰기 | **403** |
-| 교차출처 multipart `POST /api/upload` | 200, 파일 심어짐 | **403** |
-| `/api/send` 에 `text/plain` 로 고전 CSRF | 422 (원래 막힘) | 422 |
+| `Host` spoofing (DNS rebinding) → read sid from `/api/sessions` | 200, sid leaked | **403** |
+| Cross-origin WebSocket `/ws/{sid}` | accepted, shell read/write | **403** |
+| Cross-origin multipart `POST /api/upload` | 200, file planted | **403** |
+| Classic CSRF via `text/plain` on `/api/send` | 422 (already blocked) | 422 |
 
-`config.json` 의 `security.allowedHosts` 로 조정한다. 기본값은
-`127.0.0.1` · `localhost` · `[::1]` · `*.ts.net`(Tailscale MagicDNS)이다.
-**Origin 헤더가 없는 요청(curl·스크립트)은 통과**시키므로 API 자동화는 영향받지 않는다.
+Tune this with `security.allowedHosts` in `config.json`. The default is
+`127.0.0.1` · `localhost` · `[::1]` · `*.ts.net` (Tailscale MagicDNS).
+Requests **without an Origin header (curl, scripts) pass through**, so API automation is unaffected.
 
-## 왜 만들었나
+## Why it exists
 
-기존에는 네이티브 터미널(WezTerm)을 `get-text` 로 1.5초마다 **폴링해서** 웹에 비췄다.
-PTY master 는 한 프로세스가 독점하므로 그 구조로는 더 빨라질 수 없고, 슬래시 자동완성 같은
-"입력에 즉시 반응하는" 것들은 **원리상 못 한다.**
+The previous approach polled a native terminal (WezTerm) via `get-text` every 1.5s and
+mirrored it to the web. A PTY master is owned by a single process, so that design can't go
+faster, and anything that reacts instantly to input — slash autocompletion, for one — is
+**structurally impossible**.
 
-winterm-web 은 PTY 를 직접 소유한다. 그래서 실시간이 노력의 결과가 아니라 기본값이다.
+winterm-web owns the PTY directly, so real-time isn't an achievement; it's the default.
 
-| 항목 | 폴링 미러 | **winterm-web (PTY 직결)** |
+| | Polling mirror | **winterm-web (direct PTY)** |
 | --- | --- | --- |
-| 키 입력 왕복 | 79ms | **0.26ms** |
-| 화면 갱신 | 229ms + 1.5초 폴링 | **4.6ms** (push) |
-| 자동완성 등 즉시 반응 UI | ❌ 구조상 불가 | ✅ |
+| Key round-trip | 79ms | **0.26ms** |
+| Screen update | 229ms + 1.5s poll | **4.6ms** (push) |
+| Instant-reaction UI (autocomplete, …) | ❌ impossible by design | ✅ |
 
-## 구조
+## Architecture
 
 ```
-[세션 데몬 daemon.py]   ← PTY 를 소유하고 계속 산다 (tmux server 역할).  127.0.0.1:8771
-      ↕ 로컬 TCP (NDJSON)
-[웹서버 server.py]      ← 순수 중계기. 세션 상태를 하나도 갖지 않는다.   127.0.0.1:8767
-      ↕ HTTP + WebSocket
-[브라우저 xterm.js]     ← 닫아도 세션은 살아있다
+[session daemon daemon.py]   owns the PTY, stays alive (tmux-server role).  127.0.0.1:8771
+      | local TCP (NDJSON)
+[web server server.py]       pure relay, holds zero session state.          127.0.0.1:8767
+      | HTTP + WebSocket
+[browser xterm.js]           close it and the session lives on
 ```
 
-**웹서버와 데몬이 분리돼 있다는 것이 이 구조의 요점이다.** 코드를 고쳐 웹서버를 재시작해도
-열려있는 셸과 그 안의 변수가 그대로 살아남는다. 브라우저를 닫아도 마찬가지고, 다시 붙으면
-링버퍼에서 화면을 복원한다.
+**The point is that the web server and the daemon are separate.** Edit the code and
+restart the web server, and the open shells and their variables survive. Same when you
+close the browser — reconnect and the screen is restored from a ring buffer.
 
-## 실행
+## Running
 
 ```powershell
-.\start.ps1              # 웹서버 (재)기동. 데몬이 없으면 같이 띄운다 → http://127.0.0.1:8767
-.\start.ps1 -Status      # 데몬/웹서버/열린 세션 확인
-.\start.ps1 -Stop        # 웹서버만 정지 (세션은 계속 살아있다)
-.\start.ps1 -StopAll     # 데몬까지 정지  ⚠ 열려있는 셸이 전부 종료된다
-.\start.ps1 -fg          # 포그라운드로 (로그 보면서)
+.\start.ps1              # (re)start the web server; starts the daemon too if needed -> http://127.0.0.1:8767
+.\start.ps1 -Status      # daemon / web server / open sessions
+.\start.ps1 -Stop        # stop the web server only (sessions stay alive)
+.\start.ps1 -StopAll     # stop the daemon too  (WARNING: kills all open shells)
+.\start.ps1 -fg          # foreground (watch the logs)
 ```
 
-**코드를 고쳤을 때는 `.\start.ps1` 만 하면 된다** — 데몬을 건드리지 않으므로 세션이 안 죽는다.
+**After editing code, just run `.\start.ps1`** — it leaves the daemon alone, so sessions don't die.
 
-### GUI 런처 (선택)
+### GUI launcher (optional)
 
-콘솔 창 없이 아이콘으로 띄우고 싶으면 exe 런처를 빌드한다.
+To launch from an icon with no console window, build the exe launcher.
 
 ```powershell
-.\build.ps1              # 아이콘 생성 + exe 빌드
-.\build.ps1 -Shortcut    # 바탕화면 바로가기까지
+.\build.ps1              # generate icon + build exe
+.\build.ps1 -Shortcut    # also create a Desktop shortcut
 ```
 
 ```powershell
-.\webterm.exe            # 기동 + 앱 창 열기  ← 더블클릭이 이것
-.\webterm.exe --restart  # 웹서버만 재시작(세션 유지)
-.\webterm.exe --status   # 상태 + 열린 세션 목록
+.\webterm.exe            # start + open the app window  (this is the double-click target)
+.\webterm.exe --restart  # restart web server only (sessions kept)
+.\webterm.exe --status   # status + open session list
 .\webterm.exe --no-browser
-.\webterm.exe --install  # PWA 설치용으로 일반 창에서 열기 (타이틀바 제거)
+.\webterm.exe --install  # open a normal window for PWA install (removes the title bar)
 ```
 
-exe 는 **런처일 뿐 파이썬을 번들하지 않는다.** `server.py`/`app.js` 를 고쳐도 재빌드가 필요 없고,
-`launcher.py` 를 고칠 때만 다시 빌드한다. `WEBTERM_PYTHON` / `WEBTERM_ROOT` 로 경로를 강제할 수 있다.
+The exe is **only a launcher; it does not bundle Python.** You don't need to rebuild after
+editing `server.py`/`app.js` — only after editing `launcher.py`. `WEBTERM_PYTHON` /
+`WEBTERM_ROOT` override the paths.
 
-## 설정
+## Configuration
 
-`config.default.json` 이 기본값이다. **이 파일은 고치지 말고**, 같은 폴더에 `config.json` 을 만들어
-바꿀 항목만 적는다. `config.json` 은 `.gitignore` 되어 있어 업데이트에 안 쓸린다.
+`config.default.json` holds the defaults. **Don't edit it** — create `config.json` next to
+it and list only what you want to change. `config.json` is `.gitignore`d, so it survives updates.
 
 ```jsonc
 {
   "defaultCwd": "C:/work",
   "fontSize": 16,
   "keymap": {
-    "Ctrl+d": "pane.split.v",   // 조합 추가
-    "Ctrl+]": "pane.split.v",   // 기본값 재정의
-    "Ctrl+n": ""                // 끄기 — 앱이 안 가로채고 터미널로 흘려보낸다
+    "Ctrl+d": "pane.split.v",   // add a binding
+    "Ctrl+]": "pane.split.v",   // override a default
+    "Ctrl+n": ""                // disable — the app won't intercept it, it goes to the terminal
   }
 }
 ```
 
-병합은 **키 단위**다. 위처럼 세 조합만 적으면 나머지 기본 단축키는 그대로 살아있다.
-적용은 웹서버 재시작(`.\start.ps1`) 후 브라우저 새로고침.
+Merging is **per-key**: list three bindings like above and the rest of the defaults stay.
+Apply by restarting the web server (`.\start.ps1`) and refreshing the browser.
 
-| 항목 | 기본값 | 뜻 |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `defaultCwd` | `""`(홈) | 새 세션의 시작 폴더 |
-| `shell` | `""` | 띄울 셸. 비우면 `powershell.exe -NoLogo` |
-| `fontSize` | `14.7` | 기본 폰트 크기(브라우저에서 조절하면 그쪽이 이긴다) |
-| `security.allowedHosts` | loopback + `*.ts.net` | 허용할 `Host`. `*.` 로 시작하면 와일드카드 |
-| `security.allowedOrigins` | `[]` | WebSocket Origin 허용목록. 비우면 `allowedHosts` 를 따른다 |
-| `security.enabled` | `true` | 위 검사 전체 스위치 |
-| `keymap` | 아래 표 | 단축키 |
+| `defaultCwd` | `""` (home) | starting folder for new sessions |
+| `shell` | `""` | shell to launch; empty means `powershell.exe -NoLogo` |
+| `fontSize` | `14.7` | default font size (adjusting it in the browser wins) |
+| `security.allowedHosts` | loopback + `*.ts.net` | allowed `Host` values; a leading `*.` is a wildcard |
+| `security.allowedOrigins` | `[]` | WebSocket Origin allowlist; empty follows `allowedHosts` |
+| `security.enabled` | `true` | master switch for the checks above |
+| `keymap` | see below | shortcuts |
 
-### 환경변수
+### Environment variables
 
-
-| 변수 | 기본값 | 뜻 |
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `WEBTERM_PORT` | `8767` | 웹서버 포트 |
-| `WEBTERM_DAEMON_PORT` | `8771` | 세션 데몬 포트 |
-| `WEBTERM_HOST` | `127.0.0.1` | 바인딩 주소. **바꾸지 말 것** (위 보안 절 참조) |
-| `WEBTERM_SHELL` | `powershell.exe -NoLogo` | 띄울 셸. 인자를 포함할 수 있다 |
-| `WEBTERM_CWD` | 사용자 홈 | 새 세션의 시작 폴더 |
-| `WEBTERM_ROOT` | (자동 탐지) | `server.py` 가 있는 폴더. exe 를 밖에 둘 때만 필요 |
-| `WEBTERM_PYTHON` | (자동 탐지) | 쓸 파이썬 실행파일 |
+| `WEBTERM_PORT` | `8767` | web server port |
+| `WEBTERM_DAEMON_PORT` | `8771` | session daemon port |
+| `WEBTERM_HOST` | `127.0.0.1` | bind address. **Do not change** (see Security) |
+| `WEBTERM_SHELL` | `powershell.exe -NoLogo` | shell to launch; may include arguments |
+| `WEBTERM_CWD` | user home | starting folder for new sessions |
+| `WEBTERM_ROOT` | (auto-detected) | folder containing `server.py`; needed only if the exe lives elsewhere |
+| `WEBTERM_PYTHON` | (auto-detected) | Python executable to use |
 
-> 우선순위: **요청값 → `config.json` → 환경변수 → 기본값.**
-> 같은 항목이 양쪽에 있으면 `config.json` 이 이긴다.
+> Precedence: **request value → `config.json` → environment variable → default.**
+> When both sides set the same thing, `config.json` wins.
 
-## 단축키
+## Keybindings
 
-전부 `config.json` 의 `keymap` 으로 바꿀 수 있다. 브라우저 콘솔에서 `webterm.actions()` 를 치면
-쓸 수 있는 액션 목록이, `webterm.keymap()` 을 치면 지금 걸린 조합이 나온다.
+Everything is remappable via `keymap` in `config.json`. In the browser console,
+`webterm.actions()` lists the available actions and `webterm.keymap()` shows the current bindings.
 
-| 키 | 기능 | 액션 이름 |
+| Key | Action | Action name |
 | --- | --- | --- |
-| `Ctrl+]` / `Ctrl+\` | 패널 좌우 분할 / 상하 분할 | `pane.split.h` / `.v` |
-| `Ctrl+N` | 새 탭 | `tab.new` |
-| `Ctrl+T` / `Ctrl+P` | 탭 이름 / 패널 이름 | `tab.rename` / `pane.rename` |
-| `Ctrl+←` `Ctrl+→` / `Ctrl+1~9` | 탭 이동 / 탭 번호로 이동 | `tab.prev` `.next` / `tab.select:N` |
-| `Alt+1~9` / `Alt+0` | N번 패널 전체화면 / 해제 | `pane.zoom:N` / `pane.unzoom` |
-| `Alt+←` `Alt+→` | 패널 순환 (줌 유지) | `pane.prev` `.next` |
-| `Alt+X` | 패널 닫기 | `pane.close` |
-| `Alt+B` | 세로 세션 레일 토글 | `rail.toggle` |
-| `Ctrl+Shift+R` 또는 `Alt+R` | 화면 크기 다시 맞추기 | `view.refit` |
-| `Ctrl+=` `Ctrl+-` `Ctrl+0` | 폰트 크기 | `font.inc` `.dec` `.reset` |
+| `Ctrl+]` / `Ctrl+\` | split pane left-right / top-bottom | `pane.split.h` / `.v` |
+| `Ctrl+N` | new tab | `tab.new` |
+| `Ctrl+T` / `Ctrl+P` | rename tab / rename pane | `tab.rename` / `pane.rename` |
+| `Ctrl+←` `Ctrl+→` / `Ctrl+1~9` | switch tab / go to tab number | `tab.prev` `.next` / `tab.select:N` |
+| `Alt+1~9` / `Alt+0` | zoom pane N / unzoom | `pane.zoom:N` / `pane.unzoom` |
+| `Alt+←` `Alt+→` | cycle panes (keeps zoom) | `pane.prev` `.next` |
+| `Alt+X` | close pane | `pane.close` |
+| `Alt+B` | toggle the vertical session rail | `rail.toggle` |
+| `Ctrl+Shift+R` or `Alt+R` | refit the screen | `view.refit` |
+| `Ctrl+=` `Ctrl+-` `Ctrl+0` | font size | `font.inc` `.dec` `.reset` |
 
-`Ctrl+W`(단어 지우기)·`Ctrl+R`(역방향 검색)은 **일부러 안 가로챈다** — PSReadLine 이 실제로 쓴다.
-닫기가 `Alt+X` 인 이유는 `Ctrl+W` 계열을 브라우저가 먼저 먹어 창을 닫아버리기 때문이다.
+`Ctrl+W` (delete word) and `Ctrl+R` (reverse search) are **intentionally not intercepted** —
+PSReadLine uses them. Close is `Alt+X` because the browser grabs `Ctrl+W` and its variants
+to close the window before the app can react.
 
-## 폰에서 쓰기
+## On a phone
 
-같은 세션을 폰에서도 연다. 터미널 **내용**은 공유하고 **껍데기**만 기기에 맞춘다 —
-폰에는 Ctrl·Esc·Tab·방향키가 없기 때문에 가상 특수키 바와 8방향 스와이프 키보드가 따로 있다.
+Open the same session on your phone. The terminal **content** is shared; only the **shell**
+adapts to the device — a phone has no Ctrl/Esc/Tab/arrow keys, so there's a virtual
+special-key bar and an 8-direction swipe keyboard.
 
-`static/kb-layout.js` 하나만 고치면 키 배치를 바꿀 수 있다.
+Edit `static/kb-layout.js` alone to change the key layout.
 
 ## HTTP API
 
-스크립트에서 세션을 조작할 수 있다. 탭은 세션의 `name` 이고, **같은 `name` 을 가진 세션들이
-한 탭의 패널**이 된다.
+Sessions can be driven from scripts. A tab is a session `name`, and **sessions sharing a
+`name` are the panes of one tab**.
 
-| 기능 | 엔드포인트 |
+| Purpose | Endpoint |
 | --- | --- |
-| 상태 확인 | `GET /api/health` |
-| 세션 목록 / 탭 목록 | `GET /api/sessions` · `GET /api/tabs` |
-| 세션 생성 | `POST /api/sessions` `{name, cwd, cols, rows}` |
-| 텍스트 보내기 | `POST /api/send` `{target, text, submit}` |
-| 화면 읽기 | `GET /api/capture?target=...` |
-| 지목 확인 | `GET /api/resolve?target=3-2` |
-| 이름 바꾸기 | `POST /api/tabs/{name}/rename` · `POST /api/panes/label` |
-| 닫기 | `DELETE /api/sessions/{sid}` · `DELETE /api/tabs/{name}` |
-| 터미널 스트림 | `WebSocket /ws/{sid}` |
+| Health | `GET /api/health` |
+| List sessions / tabs | `GET /api/sessions` · `GET /api/tabs` |
+| Create session | `POST /api/sessions` `{name, cwd, cols, rows}` |
+| Send text | `POST /api/send` `{target, text, submit}` |
+| Read screen | `GET /api/capture?target=...` |
+| Resolve a target | `GET /api/resolve?target=3-2` |
+| Rename | `POST /api/tabs/{name}/rename` · `POST /api/panes/label` |
+| Close | `DELETE /api/sessions/{sid}` · `DELETE /api/tabs/{name}` |
+| Terminal stream | `WebSocket /ws/{sid}` |
 
-`target` 지목 문법: `3-2`(3번 탭의 2번째 패널) · `탭:패널` · `탭:2` · sid 접두.
-**부분 매칭은 일부러 막았다** — 엉뚱한 세션에 명령이 간 사고가 있었다. 모호하면 서버가 고르지 않고
-`409` 와 함께 후보 목록을 돌려준다.
+`target` syntax: `3-2` (2nd pane of tab 3) · `tab:pane` · `tab:2` · sid prefix.
+**Partial matching is disabled on purpose** — a command once went to the wrong session.
+When ambiguous, the server refuses to pick and returns `409` with a list of candidates.
 
 ```powershell
 Invoke-RestMethod "http://127.0.0.1:8767/api/send" -Method Post `
@@ -290,78 +296,80 @@ Invoke-RestMethod "http://127.0.0.1:8767/api/send" -Method Post `
   -Body ([Text.Encoding]::UTF8.GetBytes('{"target":"1-1","text":"dir","submit":true}'))
 ```
 
-## 설치가 막힐 때
+## Troubleshooting
 
-깨끗한 Windows + 새 venv 에서 `pip install` → 기동 → 셸 실행까지 실측으로 확인했다(2026-09-10).
-그래도 첫 실행에서 걸리는 자리는 대체로 아래 넷이다.
+Verified on a clean Windows + fresh venv, from `pip install` through startup and shell
+execution. The usual first-run snags:
 
-### 1. `.\start.ps1` 이 "이 시스템에서 스크립트를 실행할 수 없으므로..." 로 막힌다
+### 1. `.\start.ps1` fails with "cannot be loaded because running scripts is disabled"
 
-Windows 클라이언트의 PowerShell 기본 실행 정책이 `Restricted` 라 **모든 .ps1 이 차단**된다.
-가장 흔한 첫 관문이다. 현재 사용자 범위만 풀면 된다(관리자 권한 불필요):
+Windows clients default to the `Restricted` execution policy, which blocks **all** `.ps1`
+files. This is the most common first hurdle. Unblock it for the current user (no admin):
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-정책을 바꾸기 싫으면 그 실행에서만 우회할 수도 있다:
+If you'd rather not change the policy, bypass it for that one run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-### 2. `python` 을 못 찾는다 / 실행하면 Microsoft Store 가 열린다
+### 2. `python` isn't found / opens the Microsoft Store
 
-`PATH` 의 `WindowsApps\python.exe` 는 실제 파이썬이 아니라 **스토어 스텁**이다.
-`start.ps1` 과 `launcher.py` 는 그 경로를 걸러내지만, 진짜 파이썬이 하나도 없으면 당연히 실패한다.
-[python.org](https://www.python.org/downloads/windows/) 설치본을 쓰고, 설치 시 **Add to PATH** 를 켠다.
-경로를 직접 지정하려면 `WEBTERM_PYTHON` 환경변수를 쓴다.
+`WindowsApps\python.exe` on `PATH` is a **Store stub**, not real Python. `start.ps1` and
+`launcher.py` filter it out, but they still need a real Python installed. Use the
+[python.org](https://www.python.org/downloads/windows/) installer with **Add to PATH**
+checked, or point `WEBTERM_PYTHON` at the executable.
 
-### 3. `pip` 용어가 인식되지 않습니다
+### 3. `pip` is not recognized
 
-`python --version` 은 되는데 `pip` 만 안 되는 경우다. `python.exe` 는 `...\Python312\` 에,
-`pip.exe` 는 `...\Python312\Scripts\` 에 있어서 **PATH 항목이 서로 다르고**, 설치 시 앞쪽만
-등록되는 일이 흔하다.
+`python --version` works but `pip` doesn't. `python.exe` is in `...\Python312\` and
+`pip.exe` is in `...\Python312\Scripts\` — **separate PATH entries**, and often only the
+first gets registered.
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-`python -m pip` 는 PATH 를 타지 않고 파이썬이 자기 안의 pip 모듈을 직접 부르므로 항상 동작한다.
-`pip` 명령 자체를 쓰고 싶으면 Scripts 를 PATH 에 추가한다(새 창부터 적용):
+`python -m pip` doesn't rely on PATH — Python invokes its own pip module. To get the bare
+`pip` command, add Scripts to PATH (takes effect in a new window):
 
 ```powershell
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";" + (Split-Path (Get-Command python).Source) + "\Scripts", "User")
 ```
 
-### 4. 포트 8767 / 8771 이 이미 쓰이고 있다
+### 4. Ports 8767 / 8771 are already in use
 
 ```powershell
-.\start.ps1 -Status        # 우리 프로세스가 이미 떠 있는지 먼저 본다
-$env:WEBTERM_PORT=9767; $env:WEBTERM_DAEMON_PORT=9771; .\start.ps1   # 다른 포트로
+.\start.ps1 -Status        # check whether our process is already up
+$env:WEBTERM_PORT=9767; $env:WEBTERM_DAEMON_PORT=9771; .\start.ps1   # use other ports
 ```
 
-### 5. clone 이 26MB 라 좀 느리다
+### 5. The clone is ~26MB
 
-24MB 가 한글 폰트(Sarasa Fixed K woff2 서브셋 216개)다. 브라우저는 `unicode-range` 로
-필요한 조각만 받으므로 **실행 성능과는 무관**하고, 받을 때만 무겁다.
-CDN 을 안 쓰는 건 오프라인·사내망에서도 그대로 뜨게 하려는 의도적 선택이다.
+24MB of it is the CJK font (Sarasa Fixed K, 216 woff2 subsets). The browser fetches only
+the slices it needs via `unicode-range`, so it **doesn't affect runtime** — it's only
+heavy to download. Not using a CDN is deliberate, so it works offline and on intranets.
 
-### 확인용
+### Sanity check
 
 ```powershell
 .\start.ps1 -Status
 Invoke-RestMethod http://127.0.0.1:8767/api/health
 ```
 
-## 알려진 한계
+## Known limitations
 
-- Windows 전용 (ConPTY / pywinpty 의존)
-- 로그인·토큰이 없다. 접근 통제는 네트워크(사설망/Tailscale)에 맡기는 설계다 — 위 보안 절 참조
-- PTY 크기는 세션당 하나뿐이라 PC 와 폰이 같이 붙으면 **큰 쪽에 맞춘다**(PC 를 지키는 선택)
-- WebGL 렌더러는 화면 배율이 1이 아닐 때 그림이 밀려 그려져서 **기본 비활성**이다 (`?webgl=1` 로 켬)
+- Windows only (ConPTY / pywinpty).
+- No login or token. Access control is delegated to the network (private network / Tailscale) — see Security.
+- The PTY has one size, so when a PC and a phone attach together it takes **the larger**
+  (a deliberate choice to protect the PC).
+- The WebGL renderer draws shifted when display scale isn't 1, so it's **off by default**
+  (enable with `?webgl=1`).
 
-## 라이선스
+## License
 
-MIT — [LICENSE](LICENSE) 참조. 동봉한 서드파티 구성요소는
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 에 정리했다.
+MIT — see [LICENSE](LICENSE). Bundled third-party components are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

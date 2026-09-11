@@ -1,20 +1,20 @@
 {
   "_readme": [
-    "이 파일은 기본값이다. 고치지 말고, 같은 폴더에 config.json 을 만들어 바꿀 항목만 적는다.",
-    "config.json 은 .gitignore 되어 있고, 여기 값 위에 덮어씌워진다(keymap 은 키 단위로 병합).",
-    "적용은 웹서버 재시작(start.ps1) 후 브라우저 새로고침."
+    "These are the defaults. Don't edit this file; create config.json next to it and list only what you change.",
+    "config.json is .gitignored and is merged on top of these values (keymap merges per key).",
+    "Apply by restarting the web server (start.ps1) and refreshing the browser."
   ],
   "defaultCwd": "",
   "shell": "",
   "fontSize": 14.7,
   "security": {
     "_readme": [
-      "접근 통제 자체는 네트워크(사설망/Tailscale)에 맡긴다. 여기 있는 것은 그것으로 막을 수 없는",
-      "'사용자 브라우저에서 오는 공격'만 차단하는 자물쇠다 — DNS 리바인딩과 교차출처 WebSocket.",
-      "allowedHosts: 허용할 Host 헤더. '*.' 로 시작하면 와일드카드(서브도메인)다.",
-      "  *.ts.net 은 Tailscale MagicDNS 용 — 공격자가 그 아래 이름을 가질 수 없어 안전하다.",
-      "allowedOrigins: WebSocket 의 Origin 허용 목록. 비워두면 allowedHosts 와 같은 규칙을 쓴다.",
-      "  Origin 이 없는 요청(curl·스크립트)은 통과시킨다 — 브라우저만 Origin 을 붙이기 때문."
+      "Access control itself is delegated to the network (a private network / Tailscale). What this",
+      "guards is only what that can't stop - attacks from the user's own browser: DNS rebinding and cross-origin WebSocket.",
+      "allowedHosts: accepted Host headers. A leading '*.' is a wildcard (subdomains).",
+      "  '*.ts.net' is for Tailscale MagicDNS - an attacker can't own a name under it, so it's safe.",
+      "allowedOrigins: WebSocket Origin allowlist. Empty means use the same rule as allowedHosts.",
+      "  Requests with no Origin at all (curl, scripts) are allowed through - only browsers send Origin."
     ],
     "enabled": true,
     "allowedHosts": [
@@ -27,13 +27,13 @@
   },
   "keymap": {
     "_readme": [
-      "형식: \"조합\": \"액션\". 조합은 Ctrl → Alt → Shift 순서로 쓰고 키는 소문자다.",
-      "  예) \"Ctrl+]\"   \"Alt+arrowleft\"   \"Ctrl+Shift+r\"",
-      "액션 뒤의 :숫자 는 인자다. 전체 목록은 브라우저 콘솔에서 webterm.actions() 로 볼 수 있다.",
-      "값을 \"\" 로 두면 그 조합을 앱이 가로채지 않고 터미널로 흘려보낸다.",
-      "⚠ 브라우저가 먼저 먹어 앱이 잡을 수 없는 조합이 있다: Ctrl+W, Ctrl+Shift+W, Ctrl+Shift+T.",
-      "  그래서 패널 닫기가 Alt+X 다.",
-      "⚠ Ctrl+W(단어 지우기)·Ctrl+R(역방향 검색)은 일부러 비워뒀다 — PSReadLine 이 실제로 쓴다."
+      "Format: \"chord\": \"action\". Write the chord as Ctrl -> Alt -> Shift, keys lowercase.",
+      "  e.g. \"Ctrl+]\"   \"Alt+arrowleft\"   \"Ctrl+Shift+r\"",
+      "The :N after an action is its argument. Run webterm.actions() in the browser console for the full list.",
+      "Set a value to \"\" to stop the app intercepting that chord (it goes to the terminal).",
+      "Some chords the browser grabs first and the app can never get: Ctrl+W, Ctrl+Shift+W, Ctrl+Shift+T.",
+      "  That's why close-pane is Alt+X.",
+      "Ctrl+W (delete word) and Ctrl+R (reverse search) are left empty on purpose - PSReadLine uses them."
     ],
     "Ctrl+]": "pane.split.h",
     "Ctrl+\\": "pane.split.v",

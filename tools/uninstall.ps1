@@ -1,8 +1,8 @@
 ﻿<#
-  winterm-web 제거 — 자동시작 해제 + 서버 정지.
+  winterm-web uninstall - clear autostart + stop the server.
 
-  ⚠ 소스 폴더나 파이썬 패키지는 지우지 않는다. 폴더를 통째로 지우면 끝이고,
-     그 전에 이 스크립트로 예약작업과 돌고 있는 프로세스를 먼저 정리한다.
+  It does NOT delete the source folder or Python packages. Delete the folder to remove
+  everything; this script first cleans up the scheduled task, shortcuts, and running processes.
 #>
 param([switch]$KeepRunning)
 
@@ -11,81 +11,81 @@ $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ROOT
 
 Write-Host ""
-Write-Host "  winterm-web 정리" -ForegroundColor White
+Write-Host "  winterm-web cleanup" -ForegroundColor White
 
-# 1. 자동시작 해제
+# 1. Scheduled-task autostart
 Write-Host ""
-Write-Host "[1] 자동시작 해제" -ForegroundColor Cyan
-# ⚠ 이름만 보고 지우면 안 된다. 같은 이름의 작업이 **다른 설치본**을 가리킬 수 있고,
-#   그걸 지우면 남의(또는 내 다른 폴더의) 자동시작을 말없이 없애버린다.
-#   실제로 개발 중 이 버그로 다른 설치본의 작업을 지울 뻔했다(2026-09-11).
-#   → 이 폴더를 가리키는 작업일 때만 지운다.
+Write-Host "[1] Scheduled-task autostart" -ForegroundColor Cyan
+# Do NOT delete by name alone: a task with the same name may point at a DIFFERENT install,
+# and removing it would silently kill someone else's (or another folder's) autostart.
+# This bug nearly wiped a different install's task during development (2026-09-11).
+# -> Only remove a task that points at THIS folder.
 $t = Get-ScheduledTask -TaskName "WebtermServer" -ErrorAction SilentlyContinue
 if (-not $t) {
-    Write-Host "  등록돼 있지 않다" -ForegroundColor DarkGray
+    Write-Host "  not registered" -ForegroundColor DarkGray
 } else {
     $paths = @($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)" })
     $mine = $paths | Where-Object { $_ -like "*$ROOT*" }
     if (-not $mine) {
-        Write-Host "  건너뜀 — 등록된 작업이 다른 폴더를 가리킨다:" -ForegroundColor Yellow
+        Write-Host "  skipped - the registered task points at another folder:" -ForegroundColor Yellow
         $paths | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-        Write-Host "    (이 폴더: $ROOT)" -ForegroundColor DarkGray
-        Write-Host "    정말 지우려면: Unregister-ScheduledTask WebtermServer -Confirm:`$false" -ForegroundColor DarkGray
+        Write-Host "    (this folder: $ROOT)" -ForegroundColor DarkGray
+        Write-Host "    To remove anyway: Unregister-ScheduledTask WebtermServer -Confirm:`$false" -ForegroundColor DarkGray
     } else {
         try {
             Unregister-ScheduledTask -TaskName "WebtermServer" -Confirm:$false -ErrorAction Stop
-            Write-Host "  예약작업 WebtermServer 제거 완료" -ForegroundColor Green
+            Write-Host "  removed scheduled task WebtermServer" -ForegroundColor Green
         } catch {
-            # 실패를 성공으로 찍으면 사용자는 해제된 줄 알고 넘어간다. 그게 더 나쁘다.
-            Write-Host "  제거 실패: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "  관리자 PowerShell 에서 다시 시도해라:" -ForegroundColor Yellow
+            # Reporting a failure as success would let the user believe it's gone. That's worse.
+            Write-Host "  removal failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  Retry from an elevated PowerShell:" -ForegroundColor Yellow
             Write-Host "    Unregister-ScheduledTask WebtermServer -Confirm:`$false" -ForegroundColor DarkGray
         }
     }
 }
 
-# 1.2 시작프로그램 폴더 자동시작 제거 (예약작업 등록이 막힌 환경의 폴백 경로)
+# 1.2 Startup-folder autostart (the fallback used when a task can't be registered)
 Write-Host ""
-Write-Host "[1.2] 시작프로그램 자동시작" -ForegroundColor Cyan
+Write-Host "[1.2] Startup-folder autostart" -ForegroundColor Cyan
 $sl = Join-Path ([Environment]::GetFolderPath("Startup")) "winterm-web.lnk"
 if (Test-Path $sl) {
     $args0 = ""
     try { $args0 = (New-Object -ComObject WScript.Shell).CreateShortcut($sl).Arguments } catch {}
     if ($args0 -like "*$ROOT*") {
         Remove-Item $sl -Force
-        Write-Host "  제거 완료" -ForegroundColor Green
+        Write-Host "  removed" -ForegroundColor Green
     } else {
-        Write-Host "  건너뜀 — 다른 설치본을 가리킨다" -ForegroundColor Yellow
+        Write-Host "  skipped - points at another install" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "  없다" -ForegroundColor DarkGray
+    Write-Host "  none" -ForegroundColor DarkGray
 }
 
-# 1.5 바로가기 제거 — 이 설치본을 가리키는 것만
+# 1.5 Desktop shortcut - only the one pointing at this install
 Write-Host ""
-Write-Host "[1.5] 바탕화면 바로가기" -ForegroundColor Cyan
+Write-Host "[1.5] Desktop shortcut" -ForegroundColor Cyan
 $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "winterm-web.lnk"
 if (Test-Path $lnk) {
     $tgt = ""
     try { $tgt = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).Arguments } catch {}
     if ($tgt -like "*$ROOT*") {
         Remove-Item $lnk -Force
-        Write-Host "  제거 완료" -ForegroundColor Green
+        Write-Host "  removed" -ForegroundColor Green
     } else {
-        Write-Host "  건너뜀 — 다른 설치본을 가리킨다" -ForegroundColor Yellow
+        Write-Host "  skipped - points at another install" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "  없다" -ForegroundColor DarkGray
+    Write-Host "  none" -ForegroundColor DarkGray
 }
 
-# 2. 서버 정지
+# 2. Stop the server
 Write-Host ""
-Write-Host "[2] 서버 정지" -ForegroundColor Cyan
+Write-Host "[2] Stopping the server" -ForegroundColor Cyan
 if ($KeepRunning) {
-    Write-Host "  -KeepRunning 이라 건드리지 않는다" -ForegroundColor DarkGray
+    Write-Host "  -KeepRunning, leaving it alone" -ForegroundColor DarkGray
 } else {
-    # ⚠ 반드시 127.0.0.1 바인딩만 고른다. tailscale serve 가 같은 포트를 100.x / IPv6 에도
-    #   리슨하므로, 포트만 보고 첫 리스너를 죽이면 tailscaled 를 죽인다(실제 사고 이력).
+    # Match ONLY the 127.0.0.1 binding. tailscale serve listens on the same port on 100.x / IPv6,
+    # so killing the first listener by port alone can kill tailscaled (this has happened).
     $port = if ($env:WEBTERM_PORT) { [int]$env:WEBTERM_PORT } else { 8767 }
     $dport = if ($env:WEBTERM_DAEMON_PORT) { [int]$env:WEBTERM_DAEMON_PORT } else { 8771 }
     foreach ($p in $port, $dport) {
@@ -94,16 +94,16 @@ if ($KeepRunning) {
         if ($l) {
             $name = (Get-Process -Id $l.OwningProcess -ErrorAction SilentlyContinue).ProcessName
             Stop-Process -Id $l.OwningProcess -Force -ErrorAction SilentlyContinue
-            $what = if ($p -eq $dport) { "세션 데몬" } else { "웹서버" }
-            Write-Host "  $what 정지 (포트 $p, PID $($l.OwningProcess) $name)" -ForegroundColor Green
+            $what = if ($p -eq $dport) { "session daemon" } else { "web server" }
+            Write-Host "  stopped $what (port $p, PID $($l.OwningProcess) $name)" -ForegroundColor Green
         } else {
-            Write-Host "  포트 $p : 떠 있지 않다" -ForegroundColor DarkGray
+            Write-Host "  port $p : not running" -ForegroundColor DarkGray
         }
     }
-    Write-Host "  ⚠ 데몬을 죽였으므로 열려 있던 셸도 함께 종료됐다" -ForegroundColor Yellow
+    Write-Host "  Note: killing the daemon also ended any open shells" -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "  정리 끝. 완전히 지우려면 이 폴더를 삭제해라:" -ForegroundColor Green
+Write-Host "  Cleanup done. To remove completely, delete this folder:" -ForegroundColor Green
 Write-Host "    $ROOT" -ForegroundColor DarkGray
 Write-Host ""

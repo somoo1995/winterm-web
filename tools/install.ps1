@@ -1,20 +1,22 @@
 ﻿<#
-  winterm-web 설치 스크립트
+  winterm-web installer
 
-  install.bat 이 이 파일을 ExecutionPolicy Bypass 로 부른다.
-  .bat 을 경유하는 이유: 새 Windows 의 기본 정책(Restricted)에서는 .ps1 을 직접 못 돌린다.
-  그게 첫 실행 실패의 1순위라, 사용자가 정책을 건드리지 않아도 되게 만든다.
+  install.bat calls this file with ExecutionPolicy Bypass.
+  Why go through a .bat: a fresh Windows defaults to the Restricted policy, which won't run
+  a .ps1 directly. That's the #1 first-run failure, so the user never has to touch the policy.
 
-  하는 일
-    1) 파이썬 확인 → 없으면 winget 으로 3.12 설치 (PATH 갱신 없이 직접 찾아 쓴다)
-    2) 의존성 설치 (python -m pip)
-    3) 자동시작 등록 여부를 묻는다 (기본 아니오)
-    4) 서버 기동 + 브라우저 열기
+  What it does
+    1) Find Python -> install 3.12 via winget if missing (located directly, no PATH refresh)
+    2) Install dependencies (python -m pip)
+    3) Ask whether to enable autostart (default: no)
+    4) Start the server + open the browser
 
-  옵션
-    -Autostart     묻지 않고 자동시작 등록
-    -NoAutostart   묻지 않고 건너뜀
-    -NoStart       설치만 하고 기동하지 않음
+  Options
+    -Autostart     enable autostart without asking
+    -NoAutostart   skip without asking
+    -NoStart       install only, don't launch
+    -NoBrowser     don't open the browser
+    -NoShortcut    don't create the Desktop shortcut
 #>
 param([switch]$Autostart, [switch]$NoAutostart, [switch]$NoStart, [switch]$NoBrowser, [switch]$NoShortcut)
 
@@ -27,19 +29,19 @@ function Step($n, $msg) { Write-Host ""; Write-Host "[$n] $msg" -ForegroundColor
 function Die($msg) { Write-Host ""; Write-Host "X $msg" -ForegroundColor Red; exit 1 }
 
 Write-Host ""
-Write-Host "  winterm-web 설치" -ForegroundColor White
+Write-Host "  winterm-web installer" -ForegroundColor White
 Write-Host "  $ROOT" -ForegroundColor DarkGray
 
-# ── 1. 파이썬 ────────────────────────────────────────────────────────────────
-Step 1 "파이썬 확인"
+# -- 1. Python -----------------------------------------------------------------
+Step 1 "Checking Python"
 
 function Find-Python {
-    # PATH 의 WindowsApps\python.exe 는 Microsoft Store 스텁이라 실행하면 스토어만 열린다
+    # WindowsApps\python.exe on PATH is a Microsoft Store stub - running it just opens the Store.
     $c = Get-Command python -All -ErrorAction SilentlyContinue |
          Where-Object { $_.Source -and $_.Source -notlike "*WindowsApps*" } |
          Select-Object -First 1
     if ($c) { return $c.Source }
-    # winget 으로 방금 설치한 경우 PATH 가 아직 이 세션에 없다 → 설치 위치를 직접 뒤진다
+    # Just installed via winget? PATH isn't refreshed in this session yet -> look where it landed.
     foreach ($base in "$env:LOCALAPPDATA\Programs\Python", "$env:ProgramFiles\Python") {
         if (Test-Path $base) {
             $p = Get-ChildItem $base -Filter "Python3*" -Directory -ErrorAction SilentlyContinue |
@@ -55,11 +57,11 @@ function Find-Python {
 $py = Find-Python
 if ($py) {
     $ver = & $py --version 2>&1
-    Say "  찾음: $py  ($ver)" "Green"
+    Say "  found: $py  ($ver)" "Green"
 } else {
-    Say "  파이썬이 없다. winget 으로 3.12 를 설치한다." "Yellow"
+    Say "  No Python found. Installing 3.12 via winget." "Yellow"
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Die "winget 이 없어 자동 설치를 못 한다. https://www.python.org/downloads/windows/ 에서 3.12 를 설치하고 다시 실행해라 (설치 시 'Add to PATH' 체크)."
+        Die "winget is unavailable, so auto-install isn't possible. Install 3.12 from https://www.python.org/downloads/windows/ (check 'Add to PATH') and run again."
     }
     winget install --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
     $py = Find-Python
@@ -67,41 +69,41 @@ if ($py) {
         winget install --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
         $py = Find-Python
     }
-    if (-not $py) { Die "설치는 됐는데 python.exe 를 못 찾겠다. PowerShell 을 새로 열고 다시 실행해라." }
-    Say "  설치 완료: $py" "Green"
+    if (-not $py) { Die "Installed, but python.exe still not found. Open a new PowerShell window and run again." }
+    Say "  installed: $py" "Green"
 }
 
-# ── 2. 의존성 ────────────────────────────────────────────────────────────────
-Step 2 "의존성 설치 (1~3분 걸릴 수 있다)"
-# ⚠ pip 는 requirements.txt 를 UTF-8 이 아니라 **로케일 인코딩**(한국어 Windows=cp949)으로
-#   읽는다. 파일에 비ASCII 가 있으면 UnicodeDecodeError 로 죽는다(실측 2026-09-11, 한국어 노트북).
-#   requirements.txt 는 ASCII 로 유지하되, 안전망으로 UTF-8 모드도 켜둔다.
+# -- 2. Dependencies -----------------------------------------------------------
+Step 2 "Installing dependencies (may take 1-3 min)"
+# pip reads requirements.txt with the LOCALE encoding, not UTF-8 (cp949 on Korean Windows).
+# Non-ASCII in the file crashes it with UnicodeDecodeError (measured 2026-09-11 on a Korean
+# laptop). We keep requirements.txt ASCII, and also turn on UTF-8 mode as a safety net.
 $env:PYTHONUTF8 = "1"
 & $py -m pip install --disable-pip-version-check -q -r (Join-Path $ROOT "requirements.txt")
 if ($LASTEXITCODE -ne 0) {
-    Die "pip 설치 실패. 사내 프록시 환경이면 프록시 설정이 필요할 수 있다 (README '설치가 막힐 때' 참조)."
+    Die "pip install failed. Behind a corporate proxy you may need proxy settings (see README, Troubleshooting)."
 }
-Say "  완료" "Green"
+Say "  done" "Green"
 
-# ── 3. 자동시작 ──────────────────────────────────────────────────────────────
-Step 3 "자동시작 등록"
+# -- 3. Autostart --------------------------------------------------------------
+Step 3 "Autostart"
 $TASK = "WebtermServer"
 $want = $false
 if ($Autostart) { $want = $true }
 elseif ($NoAutostart) { $want = $false }
 else {
-    Write-Host "  로그온할 때 자동으로 띄울까?" -ForegroundColor White
-    Write-Host "  (인증이 없는 셸 서버라, 자주 안 쓸 거면 아니오를 권한다)" -ForegroundColor DarkGray
-    $want = (Read-Host "  등록? [y/N]") -match "^(y|Y)"
+    Write-Host "  Start automatically on logon?" -ForegroundColor White
+    Write-Host "  (This is an unauthenticated shell server - say no if you won't use it often.)" -ForegroundColor DarkGray
+    $want = (Read-Host "  Enable? [y/N]") -match "^(y|Y)"
 }
 
 if ($want) {
-    # ⚠ 자동시작은 부가 기능이다. 여기서 실패해도 설치 전체가 죽으면 안 된다.
-    #   (실측 2026-09-11: Register-ScheduledTask 가 Access denied 로 터지면서
-    #    $ErrorActionPreference="Stop" 때문에 설치가 통째로 중단됐다)
+    # Autostart is optional. A failure here must NOT kill the whole install.
+    # (Measured 2026-09-11: Register-ScheduledTask threw Access denied and, with
+    #  $ErrorActionPreference="Stop", it aborted the entire installer.)
     $done = $false
 
-    # ① 예약작업 — 지연·창숨김을 OS 가 해주므로 가능하면 이쪽. 단 보통 관리자 권한이 필요하다.
+    # (a) Scheduled task - the OS handles the delay and hidden window. Usually needs admin, though.
     try {
         $exe = Join-Path $ROOT "webterm.exe"
         if (Test-Path $exe) {
@@ -121,25 +123,25 @@ if ($want) {
         if ($prev) {
             $where = @($prev.Actions | ForEach-Object { "$($_.Execute) $($_.WorkingDirectory)" })
             if (-not ($where | Where-Object { $_ -like "*$ROOT*" })) {
-                Say "  주의: 기존 $TASK 작업이 다른 폴더를 가리킨다 — 덮어쓴다" "Yellow"
+                Say "  note: an existing $TASK task points elsewhere - overwriting" "Yellow"
                 $where | ForEach-Object { Say "    $_" "DarkGray" }
             }
             Unregister-ScheduledTask -TaskName $TASK -Confirm:$false -ErrorAction SilentlyContinue
         }
         Register-ScheduledTask -TaskName $TASK -Action $action -Trigger $trig -Settings $set `
-            -Description "winterm-web 자동 기동 (로그온 30초 후, 창 없이)" -ErrorAction Stop | Out-Null
-        Say "  예약작업 등록 완료 (로그온 30초 후)" "Green"
+            -Description "winterm-web autostart (30s after logon, windowless)" -ErrorAction Stop | Out-Null
+        Say "  scheduled task registered (30s after logon)" "Green"
         $done = $true
     } catch {
-        Say "  예약작업 등록 불가 ($($_.Exception.Message.Trim())) — 시작프로그램 방식으로 전환" "DarkYellow"
+        Say "  scheduled task not available ($($_.Exception.Message.Trim())) - falling back to Startup folder" "DarkYellow"
     }
 
-    # ② 시작프로그램 폴더 — 관리자 권한이 필요 없다. 지연은 autostart.ps1 이 직접 준다.
+    # (b) Startup folder - no admin needed. autostart.ps1 supplies the delay itself.
     if (-not $done) {
         try {
             $startup = [Environment]::GetFolderPath("Startup")
             $lnk = Join-Path $startup "winterm-web.lnk"
-            $auto = Join-Path $ROOT "toolsutostart.ps1"
+            $auto = Join-Path $ROOT "tools\autostart.ps1"
             $ws = New-Object -ComObject WScript.Shell
             $sc = $ws.CreateShortcut($lnk)
             $sc.TargetPath = "powershell.exe"
@@ -147,25 +149,25 @@ if ($want) {
             $sc.WorkingDirectory = $ROOT
             $ico = Join-Path $ROOT "assets\webterm.ico"
             if (Test-Path $ico) { $sc.IconLocation = $ico }
-            $sc.Description = "winterm-web 자동 기동"
+            $sc.Description = "winterm-web autostart"
             $sc.Save()
-            Say "  시작프로그램에 등록 완료 (관리자 권한 불필요)" "Green"
+            Say "  added to Startup folder (no admin needed)" "Green"
             Say "    $lnk" "DarkGray"
             $done = $true
         } catch {
-            Say "  자동시작 등록 실패: $($_.Exception.Message)" "Red"
-            Say "  설치는 계속한다. 나중에 install.bat -Autostart 로 다시 시도할 수 있다." "DarkGray"
+            Say "  autostart registration failed: $($_.Exception.Message)" "Red"
+            Say "  Continuing the install. You can retry later with install.bat -Autostart." "DarkGray"
         }
     }
 } else {
-    Say "  건너뜀 (나중에 원하면 install.bat -Autostart)" "DarkGray"
+    Say "  skipped (run install.bat -Autostart later if you want it)" "DarkGray"
 }
 
-# ── 3.5 바로가기 ─────────────────────────────────────────────────────────────
-# 자동시작을 안 걸면 여는 방법이 없어진다. 바탕화면에 하나 둔다.
-# 서버가 꺼져 있어도 되게 start.ps1 을 먼저 돌리고 브라우저를 연다.
+# -- 3.5 Shortcut --------------------------------------------------------------
+# Without autostart there's no way to open it, so drop a Desktop shortcut.
+# It runs start.ps1 first (so it works even when the server is down) and opens the browser.
 if (-not $NoShortcut) {
-    Step "3.5" "바탕화면 바로가기"
+    Step "3.5" "Desktop shortcut"
     try {
         $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "winterm-web.lnk"
         $open = Join-Path $ROOT "tools\open.ps1"
@@ -176,22 +178,22 @@ if (-not $NoShortcut) {
         $sc.WorkingDirectory = $ROOT
         $ico = Join-Path $ROOT "assets\webterm.ico"
         if (Test-Path $ico) { $sc.IconLocation = $ico }
-        $sc.Description = "winterm-web 열기"
+        $sc.Description = "Open winterm-web"
         $sc.Save()
-        Say "  바탕화면에 winterm-web 바로가기 생성" "Green"
+        Say "  created winterm-web shortcut on the Desktop" "Green"
     } catch {
-        Say "  바로가기 생성 실패(무시 가능): $($_.Exception.Message)" "DarkGray"
+        Say "  shortcut creation failed (safe to ignore): $($_.Exception.Message)" "DarkGray"
     }
 }
 
-# ── 4. 기동 ──────────────────────────────────────────────────────────────────
+# -- 4. Launch -----------------------------------------------------------------
 if ($NoStart) {
-    Step 4 "기동 생략 (-NoStart)"
-    Write-Host ""; Say "설치 끝. 실행하려면 start.ps1" "Green"
+    Step 4 "Skipping launch (-NoStart)"
+    Write-Host ""; Say "Install done. Run start.ps1 to launch." "Green"
     exit 0
 }
 
-Step 4 "기동"
+Step 4 "Launching"
 $port = if ($env:WEBTERM_PORT) { $env:WEBTERM_PORT } else { "8767" }
 & (Join-Path $ROOT "start.ps1")
 
@@ -204,13 +206,13 @@ foreach ($i in 1..15) {
 
 Write-Host ""
 if ($ok) {
-    Say "  설치 완료 → $url" "Green"
+    Say "  done -> $url" "Green"
     if (-not $NoBrowser) { Start-Process $url }
     Write-Host ""
-    Write-Host "  주의: 인증이 없다. 127.0.0.1 로만 쓰고 WEBTERM_HOST 는 건드리지 마라." -ForegroundColor Yellow
-    Write-Host "  외부에서 쓰려면 Tailscale 같은 사설망 위에서만 열어야 한다." -ForegroundColor Yellow
+    Write-Host "  Note: no authentication. Use 127.0.0.1 only and don't change WEBTERM_HOST." -ForegroundColor Yellow
+    Write-Host "  To reach it from elsewhere, expose it only over a private network like Tailscale." -ForegroundColor Yellow
 } else {
-    Say "  기동 확인 실패. webterm.log 를 봐라:" "Red"
+    Say "  Could not confirm startup. Check webterm.log:" "Red"
     Write-Host "    Get-Content `"$ROOT\webterm.log`" -Tail 30"
     exit 1
 }
