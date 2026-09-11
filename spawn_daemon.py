@@ -1,8 +1,8 @@
-"""세션 데몬 런처.
+"""Session-daemon launcher.
 
-PowerShell 의 Start-Process 로는 CREATE_NO_WINDOW 를 줄 수 없어서 한 단계 거친다.
-이 스크립트는 pythonw(창 없음)로 실행되고, 데몬만 python.exe + CREATE_NO_WINDOW 로
-띄운 뒤 즉시 종료한다 → 콘솔 flash 없이 "콘솔 있는 데몬"을 얻는다.
+PowerShell's Start-Process can't pass CREATE_NO_WINDOW, so we go through this step.
+Run under pythonw (no window), it spawns the daemon with python.exe + CREATE_NO_WINDOW
+and exits immediately -> a daemon that has a console, without a console flash.
 """
 import os
 import sys

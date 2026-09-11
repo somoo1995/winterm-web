@@ -1,10 +1,10 @@
-"""설정 로딩과 출처 검사.
+"""Config loading and origin checks.
 
-    config.default.json  (저장소 기본값, 고치지 않는다)
-          ↓ 키 단위 병합
-    config.json          (사용자 값, .gitignore 됨)
+    config.default.json  (repo defaults, don't edit)
+          | merged per key
+    config.json          (user values, .gitignored)
 
-`_readme` 키는 사람용 주석이라 병합 후 걷어낸다.
+The `_readme` keys are human comments and are stripped after merging.
 """
 import io
 import json
@@ -25,11 +25,11 @@ def _read(path):
     if not os.path.exists(path):
         return {}
     try:
-        # utf-8-sig: 사람이 메모장으로 고치면 BOM 이 붙는다. 그걸로 죽으면 안 된다.
+        # utf-8-sig: editing in Notepad adds a BOM; don't choke on it.
         return json.load(io.open(path, encoding="utf-8-sig"))
     except Exception as e:
-        # 설정이 깨졌다고 터미널을 못 쓰게 만들지 않는다. 로그를 남기고 기본값으로 간다.
-        log.error("설정을 읽지 못했다 (%s): %s → 이 파일은 무시한다", path, e)
+        # A broken config must not make the terminal unusable. Log it and fall back to defaults.
+        log.error("could not read config (%s): %s -> ignoring this file", path, e)
         return {}
 
 
@@ -40,10 +40,10 @@ def _strip_readme(o):
 
 
 def _merge(base, over):
-    """dict 는 키 단위로 병합하고 나머지는 덮어쓴다.
+    """Merge dicts per key; overwrite everything else.
 
-    키맵을 통째로 바꾸지 않고 **바꿀 조합만** 적을 수 있어야 하므로 키 단위여야 한다.
-    (`"Ctrl+n": ""` 처럼 빈 값으로 두면 그 조합을 앱이 가로채지 않는다)
+    Per-key so a user can list ONLY the bindings they change, not the whole keymap.
+    (Setting a value to "" like `"Ctrl+n": ""` stops the app intercepting that chord.)
     """
     out = dict(base)
     for k, v in (over or {}).items():
@@ -58,27 +58,27 @@ def load(force=False):
     global _cache
     if _cache is None or force:
         _cache = _strip_readme(_merge(_read(DEFAULT_PATH), _read(USER_PATH)))
-        log.info("설정 로드 — 사용자 config.json %s", "있음" if os.path.exists(USER_PATH) else "없음")
+        log.info("config loaded - user config.json %s", "present" if os.path.exists(USER_PATH) else "absent")
     return _cache
 
 
 def keymap():
-    """{"Ctrl+]": "pane.split.h", ...} — 값이 빈 문자열인 항목은 뺀다(=가로채지 않음)."""
+    """{"Ctrl+]": "pane.split.h", ...} - entries with an empty-string value are dropped (= not intercepted)."""
     return {k: v for k, v in (load().get("keymap") or {}).items() if v}
 
 
-# ── 출처 검사 ────────────────────────────────────────────────────────────────
-# 접근 통제 자체는 네트워크(사설망/Tailscale)의 몫이다. 여기서 막는 것은 그것으로
-# 막을 수 없는 것 하나 — **사용자 자신의 브라우저에서 loopback 으로 들어오는 공격**이다.
+# -- Origin checks -------------------------------------------------------------
+# Access control itself is the network's job (a private network / Tailscale). What we block
+# here is only what that can't stop - an attack from the user's OWN browser hitting loopback.
 #
-#   악성 페이지 → DNS 리바인딩으로 127.0.0.1 과 동일 출처가 됨   (Host 검사로 차단)
-#              → /api/sessions 를 읽어 sid 획득
-#              → ws://127.0.0.1/ws/<sid> 로 셸 장악              (Origin 검사로 차단)
+#   malicious page -> DNS rebinding makes it same-origin as 127.0.0.1   (blocked by Host check)
+#                  -> reads /api/sessions to get a sid
+#                  -> ws://127.0.0.1/ws/<sid> to seize the shell        (blocked by Origin check)
 #
-# 이 경로는 공격자가 tailnet 안에 있을 필요가 없어서 VPN 이 관여하지 못한다.
+# This path needs no attacker inside the tailnet, so a VPN can't help.
 
 def _norm(h):
-    """호스트 문자열을 비교 가능한 꼴로. 포트를 떼고 IPv6 대괄호를 벗긴다."""
+    """Normalize a host string for comparison: strip the port and IPv6 brackets."""
     if not h:
         return ""
     h = h.strip().lower()
@@ -86,7 +86,7 @@ def _norm(h):
         end = h.find("]")
         if end != -1:
             h = h[1:end]
-    elif h.count(":") == 1:                    # host:port (IPv6 는 콜론이 여럿이라 제외)
+    elif h.count(":") == 1:                    # host:port (IPv6 has multiple colons, so excluded)
         h = h.rsplit(":", 1)[0]
     return h
 
@@ -98,7 +98,7 @@ def _matches(host, patterns):
     for p in patterns or []:
         p = _norm(p)
         if p.startswith("*."):
-            suffix = p[1:]                     # "*.ts.net" → ".ts.net"
+            suffix = p[1:]                     # "*.ts.net" -> ".ts.net"
             if h == p[2:] or h.endswith(suffix):
                 return True
         elif h == p:
@@ -116,7 +116,7 @@ def host_allowed(host):
 
 
 def origin_allowed(origin):
-    """Origin 이 없으면 통과 — 브라우저만 Origin 을 붙이므로 curl·스크립트를 막지 않는다."""
+    """No Origin -> allowed. Only browsers send Origin, so curl/scripts aren't blocked."""
     if not origin:
         return True
     sec = load().get("security") or {}

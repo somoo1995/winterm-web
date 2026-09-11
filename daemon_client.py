@@ -1,9 +1,9 @@
 """
-웹서버 → 세션 데몬 클라이언트.
+Web server -> session daemon client.
 
-설계 원칙: 웹서버는 **순수 중계기**다. 세션 상태를 하나도 갖지 않는다.
-    - 제어 요청은 연결 1회용(로컬 TCP 라 저렴하고, 웹서버가 끊겨도 남는 상태가 없다)
-    - 브라우저 WS 하나당 데몬 attach 연결 하나 → 팬아웃은 데몬이 이미 하므로 라우팅 로직이 필요 없다
+Design: the web server is a pure relay and holds no session state.
+    - Control requests are one-shot connections (local TCP is cheap, and nothing lingers if the web server drops)
+    - One daemon attach connection per browser WS -> the daemon already fans out, so no routing logic here
 """
 import asyncio
 import json
@@ -18,11 +18,10 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("WEBTERM_DAEMON_PORT", "8771"))
 
-# ⚠ 데몬은 **콘솔이 있어야 한다**.
-#   pythonw.exe(콘솔 없음)나 DETACHED_PROCESS(콘솔 분리)로 띄우면 ConPTY 생성이
-#   `PanicException: HRESULT(0x00000000)` 로 죽는다(실측). CreatePseudoConsole 이
-#   콘솔 인프라를 필요로 하기 때문.
-#   CREATE_NO_WINDOW = 콘솔은 할당하되 **창은 띄우지 않는다** → 콘솔 flash 없이 ConPTY 가능.
+# The daemon MUST have a console. Under pythonw.exe (no console) or DETACHED_PROCESS,
+# ConPTY creation dies with PanicException: HRESULT(0x00000000) (measured), because
+# CreatePseudoConsole needs console infrastructure.
+# CREATE_NO_WINDOW = allocate a console but show no window -> ConPTY works, no console flash.
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
@@ -32,8 +31,7 @@ class DaemonDown(Exception):
 
 
 def _python():
-    """콘솔 있는 python.exe 를 찾는다(pythonw 는 ConPTY 가 안 된다).
-    PATH 의 WindowsApps 스텁도 피한다."""
+    """Find a python.exe with a console (pythonw can't do ConPTY). Also avoid the WindowsApps stub."""
     exe = sys.executable or "python.exe"
     if exe.lower().endswith("pythonw.exe"):
         cand = os.path.join(os.path.dirname(exe), "python.exe")
@@ -44,7 +42,7 @@ def _python():
 
 def spawn_daemon():
     cmd = [_python(), os.path.join(BASE, "daemon.py")]
-    log.info("데몬 기동: %s", cmd)
+    log.info("spawning daemon: %s", cmd)
     subprocess.Popen(
         cmd, cwd=BASE, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -52,11 +50,10 @@ def spawn_daemon():
     )
 
 
-# ⚠ asyncio 스트림의 기본 readline 버퍼는 **64KB** 다.
-#   backlog(재접속 화면 복원용 링버퍼)는 256KB 까지 자라고 JSON 이스케이프로 더 커지므로,
-#   기본값이면 `ValueError: Separator is not found, and chunk exceed the limit` 로
-#   **화면 복원이 통째로 실패한다.**
-#   실제 증상: 출력이 많은 claude 탭만 화면이 안 그려지고, 조용한 셸 탭은 멀쩡했다.
+# asyncio's default readline buffer is 64KB. The backlog (ring buffer for reconnect redraw)
+# grows to 256KB and more after JSON escaping, so the default fails the whole redraw with
+# "ValueError: Separator is not found, and chunk exceed the limit".
+# Symptom seen: only busy claude tabs failed to draw; quiet shell tabs were fine.
 STREAM_LIMIT = 16 * 1024 * 1024
 
 
@@ -66,7 +63,7 @@ async def connect(timeout=2.0):
 
 
 async def ensure_daemon(tries=12, delay=0.4):
-    """데몬이 없으면 띄우고, 뜰 때까지 기다린다."""
+    """Spawn the daemon if it's down and wait until it's up."""
     try:
         r, w = await connect(0.6)
         w.close()
@@ -79,7 +76,7 @@ async def ensure_daemon(tries=12, delay=0.4):
         try:
             r, w = await connect(0.6)
             w.close()
-            log.info("데몬 연결 확인")
+            log.info("daemon connection confirmed")
             return True
         except Exception:
             continue
@@ -87,31 +84,31 @@ async def ensure_daemon(tries=12, delay=0.4):
 
 
 async def request(msg, timeout=10.0):
-    """제어 요청 1건. 데몬이 없으면 한 번 띄워보고 재시도한다."""
+    """One control request. If the daemon is down, try spawning it once and retry."""
     for attempt in (1, 2):
         try:
             r, w = await connect()
         except Exception:
             if attempt == 1 and await ensure_daemon():
                 continue
-            raise DaemonDown("세션 데몬에 연결할 수 없습니다")
+            raise DaemonDown("cannot connect to the session daemon")
         try:
             w.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
             await w.drain()
             line = await asyncio.wait_for(r.readline(), timeout)
             if not line:
-                raise DaemonDown("데몬이 응답 없이 연결을 닫았습니다")
+                raise DaemonDown("daemon closed the connection without responding")
             return json.loads(line)
         finally:
             try:
                 w.close()
             except Exception:
                 pass
-    raise DaemonDown("세션 데몬에 연결할 수 없습니다")
+    raise DaemonDown("cannot connect to the session daemon")
 
 
 class Attach:
-    """브라우저 WS 하나에 대응하는 데몬 스트림 연결."""
+    """A daemon stream connection matching one browser WS."""
 
     def __init__(self, sid):
         self.sid = sid
@@ -123,10 +120,10 @@ class Attach:
         await self._send({"op": "attach", "sid": self.sid})
         line = await self.r.readline()
         if not line:
-            raise DaemonDown("attach 실패")
+            raise DaemonDown("attach failed")
         ack = json.loads(line)
         if not ack.get("ok"):
-            raise DaemonDown(ack.get("error", "attach 거부"))
+            raise DaemonDown(ack.get("error", "attach refused"))
         return ack.get("result", {})
 
     async def _send(self, obj):
@@ -140,7 +137,7 @@ class Attach:
         await self._send({"t": "r", "c": cols, "r": rows})
 
     async def events(self):
-        """데몬이 밀어주는 출력 스트림. ('out', 문자열) 또는 ('end', None)."""
+        """Output stream pushed by the daemon: ('out', str) or ('end', None)."""
         while True:
             line = await self.r.readline()
             if not line:
