@@ -20,7 +20,8 @@ import time
 import urllib.parse
 import uuid
 
-from winpty import PTY
+import pty_backend
+from pty_backend import IS_WINDOWS, POLL_IDLE
 
 log = logging.getLogger("webterm.session")
 
@@ -43,8 +44,6 @@ _ST = _ESC + chr(92)                 # ESC + backslash
 #   - Must be well under daemon_client's STREAM_LIMIT (16MB) since JSON escaping inflates it
 #     (the 64KB default once caused "only claude tabs fail to draw")
 RING_CHARS = 2 * 1024 * 1024
-# Idle sleep when the PTY has nothing to read. 0 burns CPU; too big adds latency.
-POLL_IDLE = 0.004
 
 # -- Environment scrubbing -----------------------------------------------------
 # The rules live in envclean.py (the launcher uses the same ones).
@@ -52,12 +51,15 @@ from envclean import clean_env  # noqa: E402
 
 
 def build_env(extra=None):
-    """Environment to pass to the PTY. `extra` is added for this session only (its own address, etc.)."""
+    """Environment to pass to the PTY. `extra` is added for this session only (its own address, etc.).
+
+    Returns a plain dict. Whatever shape the platform's PTY library actually wants (pywinpty takes
+    one NUL-joined string) is pty_backend's business, not ours.
+    """
     env = clean_env()
     if extra:
         env.update({k: v for k, v in extra.items() if v is not None})
-    # pywinpty wants a "name=value\0name=value\0..." string
-    return "".join(f"{k}={v}\0" for k, v in env.items())
+    return env
 
 
 # Inject the session's OWN address as env vars - a claude running inside a pane needs to know
@@ -69,48 +71,8 @@ def build_env(extra=None):
 # Only the immutable SID is stamped; if the current position is needed, ask
 # `GET /api/resolve?target=$WEBTERM_SID`. TAB can be renamed too, so it means "the initial name" only.
 #
-# Prompt injection that makes PowerShell REPORT its current folder.
-#
-# Goal: after `cd`, a split (`Ctrl+]`) must open the new pane in THAT folder.
-#   Measured (2026-08-26): this shell emits none of OSC 7 / 9;9 / window title -> we make it emit.
-#   Same trick Windows Terminal's shell integration uses (emit OSC 7 from the prompt).
-#
-# Three rules:
-#   1. Don't break the user's prompt - the profile loads first and `-Command` runs after, so we
-#      capture the existing `prompt` ($o) and have ours call it as-is.
-#   2. PowerShell 5.1 syntax only - the `` `e `` escape is PS6+, so use `[char]27`
-#      (same family of pitfall as the profile-BOM incident).
-#   3. Don't emit at non-filesystem locations (registry, etc.).
-def _osc7_prompt_arg():
-    return (
-        ' -NoExit -Command "'
-        "$e=[char]27;$b=[char]7;"
-        "$o=(Get-Command prompt -EA SilentlyContinue).ScriptBlock;"
-        "function global:prompt{"
-        "$l=$ExecutionContext.SessionState.Path.CurrentLocation;"
-        "if($l.Provider.Name -eq 'FileSystem'){"
-        "[Console]::Write($e+']7;file:///'+($l.ProviderPath -replace '\\\\','/')+$b)};"
-        "if($o){& $o}else{'PS '+$l.Path+'> '}}"
-        '"'
-    )
-
-
-def shell_cmdline(shell):
-    """The (exe, args-string) to pass to spawn. For PowerShell, append the OSC 7 prompt.
-
-    Leave `self.shell` as the original - mixing this long injection into the reporting string
-    makes the session list hard to read.
-    """
-    exe, _, rest = shell.partition(" ")
-    rest = rest.strip()
-    base = os.path.basename(exe).lower()
-    is_ps = base.startswith("powershell") or base.startswith("pwsh")
-    # If the user already told it to run something via -Command, leave it (overwriting kills their intent)
-    if is_ps and "-command" not in rest.lower():
-        rest = (rest + _osc7_prompt_arg()).strip()
-    return exe, (rest or None)
-
-
+# (How a shell string becomes a spawned process - and the PowerShell OSC 7 prompt injection that
+# makes it report its cwd - now lives in pty_backend.py, because the answer differs per platform.)
 def self_addr_env(sid, tab, port=8767):
     return {
         "WEBTERM_SID": sid,                                   # immutable - use this as the reply address
@@ -152,12 +114,11 @@ class Session:
         self.label = ""
         self._osc_tail = ""                   # tail carrying an OSC split across a chunk boundary
 
-        self.pty = PTY(cols, rows)
-        # Use only the first token as the exe so `shell` can carry arguments
-        # (default `powershell.exe -NoLogo` - no banner so the prompt starts on line 1)
-        exe, args = shell_cmdline(shell)
-        self.pty.spawn(exe, cmdline=args, cwd=cwd,
-                       env=build_env(self_addr_env(sid, name)))
+        # `shell` stays the plain string the user sees in the session list; pty_backend turns it
+        # into whatever the platform's spawn API wants (exe+cmdline on Windows, argv on POSIX).
+        self.pty = pty_backend.open_pty(shell, cwd=cwd,
+                                        env=build_env(self_addr_env(sid, name)),
+                                        cols=cols, rows=rows)
 
         self._thread = threading.Thread(target=self._reader, daemon=True,
                                         name=f"pty-{sid[:8]}")
@@ -167,25 +128,19 @@ class Session:
 
     # ---------- reader ----------
     def _reader(self):
+        # read() contract (see pty_backend): str = output, "" = nothing yet, None = EOF.
+        # The "" case is what lets this thread notice `_alive` flipping and exit, instead of
+        # blocking in a read forever after the session is closed.
         while self._alive:
-            try:
-                data = self.pty.read(blocking=False)
-            except Exception as e:
-                log.info("pty read ended sid=%s: %s", self.sid, e)
+            data = self.pty.read(POLL_IDLE)
+            if data is None:
                 break
             if data:
                 self._scan_title(data)
                 self._append_ring(data)
                 self._broadcast(data)
-                continue
-            if not self.pty.isalive():
-                break
-            time.sleep(POLL_IDLE)
         self._alive = False
-        try:
-            self._exit_code = self.pty.get_exitstatus()
-        except Exception:
-            pass
+        self._exit_code = self.pty.exit_status()
         log.info("session ended sid=%s exit=%s", self.sid, self._exit_code)
         self._broadcast(None)  # end signal
 
@@ -205,16 +160,19 @@ class Session:
     # the spawn folder.
     @staticmethod
     def _path_from_file_url(u):
-        """`file:///C:/a/b` or `file://host/C:/a/b` -> `C:\\a\\b`, else None."""
+        """`file:///C:/a/b` or `file://host/C:/a/b` -> `C:\\a\\b` on Windows, `/a/b` on POSIX.
+
+        urlsplit does the host-vs-path separation for us, which matters because the two platforms
+        disagree about what the leading slash means: on Windows `/C:/a/b` has a throwaway slash in
+        front of the drive letter, on POSIX that same slash IS the root and dropping it would turn
+        an absolute path into a relative one.
+        """
         if not u.startswith("file:"):
             return None
-        rest = u[5:]
-        while rest.startswith("/"):
-            rest = rest[1:]
-        if "/" in rest and ":" not in rest.split("/", 1)[0]:
-            rest = rest.split("/", 1)[1]          # drop the host part (`file://host/C:/...`)
-        rest = urllib.parse.unquote(rest)         # restore %XX (spaces, etc.)
-        return rest.replace("/", os.sep) or None
+        path = urllib.parse.unquote(urllib.parse.urlsplit(u).path)   # restore %XX (spaces, etc.)
+        if IS_WINDOWS:
+            return path.lstrip("/").replace("/", os.sep) or None
+        return path or None
 
     def _update_cwd(self, path):
         path = os.path.normpath(path)
@@ -338,14 +296,7 @@ class Session:
 
     def close(self):
         self._alive = False
-        try:
-            self.pty.write("\x03")   # try to interrupt whatever is running
-        except Exception:
-            pass
-        try:
-            del self.pty              # pywinpty cleans up the process on destruction
-        except Exception:
-            pass
+        self.pty.close()              # interrupt + reap; the how differs per platform
         self._broadcast(None)
 
     @property
@@ -380,8 +331,7 @@ class SessionManager:
 
     def create(self, name=None, shell=None, cwd=None, cols=120, rows=30):
         sid = uuid.uuid4().hex[:12]
-        # -NoLogo: without the 5-line banner the prompt starts on line 1
-        shell = shell or os.environ.get("WEBTERM_SHELL", "powershell.exe -NoLogo")
+        shell = shell or os.environ.get("WEBTERM_SHELL") or pty_backend.default_shell()
         cwd = cwd or os.environ.get("WEBTERM_CWD") or os.path.expanduser("~")
         if not os.path.isdir(cwd):
             # Falling back to home silently hides "why did it open in the wrong place".

@@ -1,0 +1,70 @@
+# Runs tools/selfcheck.py on all three supported platforms.
+#
+# Why this exists: the PTY layer is the one part of this project that cannot be tested by
+# reading it - it either opens a real shell on a real OS or it doesn't. The macOS runner is
+# actual Apple hardware, which is otherwise hard to get hold of.
+#
+# What it does NOT cover (needs a human on a desktop):
+#   - clipboard with real clipboard contents (pbpaste/osascript, PowerShell STA)
+#   - Gatekeeper / SmartScreen on a downloaded installer
+#   - Chrome PWA install path, window controls
+#   - launchd / Scheduled Task autostart
+name: selfcheck
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selfcheck:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    # The 3.9 rows are informational: they answer "does the system python that ships with macOS
+    # work, or must the installer require a newer one?" A red 3.9 row is an INSTALLER decision,
+    # not a broken port, so it must not gate the real rows.
+    continue-on-error: ${{ matrix.informational == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12"]
+        include:
+          - os: macos-latest
+            python: "3.9"
+            informational: true
+          - os: ubuntu-latest
+            python: "3.9"
+            informational: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Show installed packages
+        run: python -m pip list
+
+      - name: Self-check
+        run: python tools/selfcheck.py
+
+      # The runner's $SHELL is bash, but macOS has defaulted to zsh since Catalina - so the
+      # shell a real user gets is NOT the one the step above exercised. Run it again, pinned.
+      - name: Self-check (zsh - the real macOS default)
+        if: runner.os == 'macOS'
+        env:
+          WEBTERM_SHELL: /bin/zsh -l
+        run: python tools/selfcheck.py
+
+      # selfcheck drives SessionManager in-process. This boots the actual web server and goes
+      # through HTTP, which is the only way to exercise server.py importing, the static/mimetype
+      # setup, and the server auto-spawning a DETACHED daemon.
+      - name: Smoke test (real server over HTTP)
+        run: python tools/smoketest.py
