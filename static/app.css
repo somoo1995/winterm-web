@@ -712,3 +712,12 @@ body.phone .st-warn{padding-left:0}
 #stale-x{border:0; color:#ffd9a0; padding:5px 7px}
 /* The banner covers the tab bar, so push everything down while it is up. */
 body.has-stale #tabbar{margin-top:38px}
+
+/* IME event counter (`?ime=1`). Diagnostic only - a phone has no console, so the tally goes
+   on screen where whoever is holding it can read it. */
+#imeprobe{
+  position:fixed; left:6px; bottom:6px; z-index:90;
+  padding:5px 9px; border-radius:7px; font-size:11px;
+  background:rgba(26,27,38,.92); color:var(--orange); border:1px solid var(--orange);
+  pointer-events:none;
+}

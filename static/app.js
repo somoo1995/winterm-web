@@ -47,6 +47,11 @@
   // Baseline that font.reset returns to; config.json fontSize overrides it at boot.
   let baseFont = 14.7;
 
+  // Which modifier the APP owns. On macOS that is Cmd, so Ctrl reaches the shell intact -
+  // Ctrl+C, Ctrl+R, Ctrl+P and friends belong to readline, and a terminal that eats them is a
+  // worse terminal. Windows has no such conflict and keeps Ctrl.
+  const IS_MAC_UI = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+
   const isPhone = (() => {
     const f = /[?&]kb=([01])/.exec(location.search);
     return f ? f[1] === "1" : (matchMedia("(pointer: coarse)").matches && innerWidth < 900);
@@ -87,7 +92,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 118;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 119;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -120,12 +125,38 @@
   // redrawing mid-composition makes the IME drop it and leak partial jamo, so we
   // track composition and leave everything alone while it runs.
   let composing = false;
-  document.addEventListener("compositionstart", () => { composing = true; }, true);
+  document.addEventListener("compositionstart", () => { composing = true; imeProbe("start"); }, true);
+  document.addEventListener("compositionupdate", () => imeProbe("update"), true);
   document.addEventListener("compositionend", () => {
     composing = false;
+    imeProbe("end");
     // flush any resize deferred during composition, else the size stays wrong
     if (typeof scheduleResize === "function") scheduleResize();
   }, true);
+
+  // `?ime=1` counts IME events and shows the tally on screen.
+  //
+  // Korean typed on an iPhone arrives in the terminal decomposed - the jamo go through one at a
+  // time instead of composing into syllables. That means either the IME events are not firing at
+  // all, or they fire and something sends anyway, and those two have completely different fixes.
+  // A phone browser has no console to check in, and wiring a Mac up over USB to borrow Safari's
+  // inspector is enough friction that the question just stays open.
+  //
+  // So it counts them and puts the number on the screen. Whoever is holding the phone reads it.
+  const IME_PROBE = /[?&]ime=1/.test(location.search);
+  const imeCounts = { start: 0, update: 0, end: 0 };
+  let imeBox = null;
+  function imeProbe(kind) {
+    if (!IME_PROBE) return;
+    imeCounts[kind] = (imeCounts[kind] || 0) + 1;
+    if (!imeBox) {
+      imeBox = document.createElement("div");
+      imeBox.id = "imeprobe";
+      document.body.appendChild(imeBox);
+    }
+    imeBox.textContent =
+      `IME  start ${imeCounts.start}  update ${imeCounts.update}  end ${imeCounts.end}`;
+  }
 
   const applyInputMode = (term) => {
     if (!isPhone || !term || !term.textarea) return;
@@ -1802,8 +1833,12 @@
     }
     return (e.key || "").toLowerCase();
   };
+  //
+  // The app modifier is spelled "Ctrl+" in a chord whichever key it physically is, so one
+  // config file serves every platform and a keymap copied from a Windows machine still works.
+  const appMod = (e) => (IS_MAC_UI ? e.metaKey : e.ctrlKey);
   const chordOf = (e) =>
-    (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") +
+    (appMod(e) ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") +
     (e.shiftKey ? "Shift+" : "") + baseKeyOf(e);
 
   let keymap = new Map();                    // chord -> { id, arg }
@@ -1822,6 +1857,28 @@
       }
       keymap.set(chord, { id, arg });
     }
+  }
+
+  // Two shipped defaults would land on a Cmd chord the browser keeps for itself - Cmd+N
+  // opens a window, Cmd+T a tab, and the page never sees either. On macOS they move to the
+  // Alt layer, which the app already owns.
+  //
+  // Only DEFAULTS move. A binding the user has changed is theirs, and silently relocating it
+  // would be worse than leaving it somewhere the browser eats - at least that is visible, and
+  // the settings panel warns about it.
+  const MAC_DEFAULT_MOVES = { "Ctrl+n": "Alt+n", "Ctrl+t": "Alt+t" };
+
+  function withMacDefaults(km, shipped) {
+    if (!IS_MAC_UI) return km;
+    const out = Object.assign({}, km);
+    for (const from of Object.keys(MAC_DEFAULT_MOVES)) {
+      const to = MAC_DEFAULT_MOVES[from];
+      if (!shipped || out[from] !== shipped[from]) continue;   // user changed it - leave alone
+      if (out[to]) continue;                                   // target already bound - leave alone
+      out[to] = out[from];
+      delete out[from];
+    }
+    return out;
   }
 
   // Built-in defaults for when the config cannot be fetched; without them one server
@@ -1893,7 +1950,7 @@
       }
     }
     const km = (cfg && cfg.keymap && Object.keys(cfg.keymap).length) ? cfg.keymap : FALLBACK_KEYMAP;
-    setKeymap(km);
+    setKeymap(withMacDefaults(km, (cfg && cfg.defaults) || FALLBACK_KEYMAP));
   }
 
 
@@ -1954,7 +2011,6 @@
   const ARG_ACTIONS = new Set(["pane.zoom", "tab.select"]);
   // Chords the browser takes before the page ever sees them, so binding one is a silent no-op.
   // The set differs per platform, which is exactly what a user cannot be expected to know.
-  const IS_MAC_UI = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
   const RESERVED = IS_MAC_UI
     ? ["Ctrl+w", "Ctrl+t", "Ctrl+n", "Ctrl+q", "Ctrl+Shift+w", "Ctrl+Shift+t"]
     : ["Ctrl+w", "Ctrl+Shift+w", "Ctrl+Shift+t"];
@@ -2156,7 +2212,9 @@
     // rather than only after a reload.
     window.i18n.setLang(cfg.language || "");
     DEFAULT_CWD = cfg.defaultCwd || "";
-    setKeymap(cfg.keymap && Object.keys(cfg.keymap).length ? cfg.keymap : FALLBACK_KEYMAP);
+    setKeymap(withMacDefaults(
+      cfg.keymap && Object.keys(cfg.keymap).length ? cfg.keymap : FALLBACK_KEYMAP,
+      cfg.defaults || FALLBACK_KEYMAP));
     if (cfg.fontSize) {
       baseFont = +cfg.fontSize;
       // A font size set in THIS browser still wins, same rule as on first load.
