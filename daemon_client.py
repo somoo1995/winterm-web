@@ -18,10 +18,14 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("WEBTERM_DAEMON_PORT", "8771"))
 
-# The daemon MUST have a console. Under pythonw.exe (no console) or DETACHED_PROCESS,
-# ConPTY creation dies with PanicException: HRESULT(0x00000000) (measured), because
-# CreatePseudoConsole needs console infrastructure.
+# WINDOWS ONLY: the daemon MUST have a console. Under pythonw.exe (no console) or
+# DETACHED_PROCESS, ConPTY creation dies with PanicException: HRESULT(0x00000000) (measured),
+# because CreatePseudoConsole needs console infrastructure.
 # CREATE_NO_WINDOW = allocate a console but show no window -> ConPTY works, no console flash.
+#
+# None of this exists on POSIX - a forked pty has no console concept at all, so there the daemon
+# just needs to survive its parent, which is what start_new_session (setsid) does.
+IS_WINDOWS = sys.platform == "win32"
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
@@ -31,9 +35,14 @@ class DaemonDown(Exception):
 
 
 def _python():
-    """Find a python.exe with a console (pythonw can't do ConPTY). Also avoid the WindowsApps stub."""
-    exe = sys.executable or "python.exe"
-    if exe.lower().endswith("pythonw.exe"):
+    """The interpreter to launch the daemon with.
+
+    Windows: must be python.exe, NOT pythonw.exe - pythonw has no console and ConPTY then panics.
+    Also avoids the WindowsApps stub.
+    POSIX: whatever is running us is fine.
+    """
+    exe = sys.executable or ("python.exe" if IS_WINDOWS else "python3")
+    if IS_WINDOWS and exe.lower().endswith("pythonw.exe"):
         cand = os.path.join(os.path.dirname(exe), "python.exe")
         if os.path.exists(cand):
             return cand
@@ -43,10 +52,12 @@ def _python():
 def spawn_daemon():
     cmd = [_python(), os.path.join(BASE, "daemon.py")]
     log.info("spawning daemon: %s", cmd)
+    kwargs = ({"creationflags": CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+              else {"start_new_session": True})
     subprocess.Popen(
         cmd, cwd=BASE, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        **kwargs,
     )
 
 

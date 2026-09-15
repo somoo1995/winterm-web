@@ -9,5 +9,8 @@ websockets>=13
 anyio>=4.9
 python-multipart>=0.0.9
 
-# Windows only - the ConPTY binding. This is why the project is Windows-only.
+# The PTY binding - exactly one of these installs, picked by the platform marker.
+# Windows uses ConPTY via pywinpty; macOS/Linux use a forked pty via ptyprocess.
+# Both are wrapped by pty_backend.py, which is the only module that imports either one.
 pywinpty>=2.0 ; sys_platform == "win32"
+ptyprocess>=0.7 ; sys_platform != "win32"

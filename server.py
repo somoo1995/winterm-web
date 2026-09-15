@@ -52,6 +52,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("webterm")
 
+# This process never opens a PTY itself, but it is the one the user launches, so it is where an
+# unsupported platform should be reported. Without this the only symptom is "the daemon never
+# comes up" and the real reason sits in daemon.log.
+try:
+    from pty_backend import PtyUnavailable, check_supported
+
+    check_supported()
+except PtyUnavailable as e:
+    log.error("cannot start on this platform: %s", str(e).replace("\n", " / "))
+    print(f"winterm-web: {e}", file=sys.stderr)
+    sys.exit(1)
+
 
 @asynccontextmanager
 async def lifespan(app):

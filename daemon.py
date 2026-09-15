@@ -48,6 +48,17 @@ logging.basicConfig(
 log = logging.getLogger("webterm.daemon")
 
 sys.path.insert(0, BASE)
+from pty_backend import PtyUnavailable, check_supported, platform_name  # noqa: E402
+
+# Fail here, with a sentence, rather than 20 frames down inside an import. The daemon is the
+# process that actually owns the PTYs, so if the platform can't provide one nothing else matters.
+try:
+    check_supported()
+except PtyUnavailable as e:
+    log.error("cannot start on this platform: %s", str(e).replace("\n", " / "))
+    print(f"winterm-web: {e}", file=sys.stderr)
+    sys.exit(1)
+
 from session import SessionManager  # noqa: E402
 
 HOST = "127.0.0.1"
