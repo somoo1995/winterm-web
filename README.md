@@ -161,6 +161,31 @@ winterm-web owns the PTY directly, so real-time isn't an achievement; it's the d
 restart the web server, and the open shells and their variables survive. Same when you
 close the browser — reconnect and the screen is restored from a ring buffer.
 
+### One source tree, per-platform installers
+
+Windows, macOS and Linux run the **same code**. What differs per platform is the
+installation — `.bat` on Windows, a shell script on macOS and Linux, Scheduled Tasks
+versus `launchd` versus `systemd --user`.
+
+The code stays shared because almost none of it is platform-specific. At the time of
+writing, 6,400 lines carried 32 platform branches, and 13 of those were in
+`pty_backend.py`, the module that exists to hold them. `session.py` — the module that
+actually drives the PTY — had two.
+
+So the rule is: **platform branches live in a `*_backend.py` module, and everything else
+asks that module.** `session.py` never tests `sys.platform`; it calls `pty_backend`, which
+knows that Windows wants `(exe, cmdline)` and POSIX wants an `argv` list, that sizes are
+`(cols, rows)` one side and `(rows, cols)` the other.
+
+`tools/check_platform_branches.py` enforces this and runs in CI. A branch that appears
+outside a backend module fails the build, with a message saying where it should go
+instead. Files that predate the rule are capped at their current count, so the debt cannot
+grow quietly.
+
+The danger was never the number of branches — it is branches spreading into code that has
+no business knowing which OS it is on. That is how one codebase becomes three that happen
+to share a directory.
+
 ## Running
 
 ```powershell

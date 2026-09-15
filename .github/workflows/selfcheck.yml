@@ -52,6 +52,11 @@ jobs:
       - name: Show installed packages
         run: python -m pip list
 
+      # One source tree stays affordable only while the OS-specific parts stay in known
+      # files. This fails if a platform branch appears anywhere else.
+      - name: Platform branches stay in backend modules
+        run: python tools/check_platform_branches.py
+
       - name: Self-check
         run: python tools/selfcheck.py
 
