@@ -61,6 +61,7 @@
     "Alt+8": "pane.zoom:8",
     "Alt+9": "pane.zoom:9",
     "Alt+0": "pane.unzoom",
+    "Alt+z": "pane.zoom.toggle",
     "Alt+arrowleft": "pane.prev",
     "Alt+arrowright": "pane.next",
     "Alt+x": "pane.close",
