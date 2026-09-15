@@ -79,7 +79,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 109;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 115;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1770,9 +1770,23 @@
 
   // Event -> "Ctrl+Alt+Shift+key". It must spell chords exactly like the config file does,
   // so matching and dispatch share this one function.
+  //
+  // `e.key` is the CHARACTER produced, and on macOS holding Option composes a different one:
+  // Option+1 is "¡", Option+x is "≈", Option+b is "∫". Spelled from e.key, every Alt+letter and
+  // Alt+digit binding became a chord no config could ever contain, so 13 of the defaults were
+  // dead on a Mac (Alt+arrows survived - arrows are not characters). `e.code` is the physical
+  // key and is untouched by modifiers or layout, so take the base key from there whenever Alt is
+  // held. Windows produces the same "Digit1"/"KeyX" codes, so this changes nothing there.
+  const baseKeyOf = (e) => {
+    if (e.altKey) {
+      const m = /^(?:Digit|Key)(.)$/.exec(e.code || "");
+      if (m) return m[1].toLowerCase();
+    }
+    return (e.key || "").toLowerCase();
+  };
   const chordOf = (e) =>
     (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") +
-    (e.shiftKey ? "Shift+" : "") + e.key.toLowerCase();
+    (e.shiftKey ? "Shift+" : "") + baseKeyOf(e);
 
   let keymap = new Map();                    // chord -> { id, arg }
 
@@ -1816,9 +1830,19 @@
   // Close is Alt+X because Ctrl+W and Ctrl+Shift+W close the browser window before the app
   // sees them; the letter matches WezTerm's Leader+x.
 
+  // A chord must not FIRE while a modal owns the keyboard. The rename prompt needed this so
+  // Ctrl+P would not reopen itself; the settings panel needs it more, because recording a
+  // shortcut means pressing the very chord that would otherwise run - hitting Ctrl+] to bind it
+  // split a pane behind the open panel.
+  //
+  // This has to be a check HERE rather than stopPropagation() in the recorder: both listeners sit
+  // on window in the capture phase, and this one is registered first, so it has already run by the
+  // time the recorder sees the event. Stopping propagation afterwards is too late.
+  const modalOpen = () =>
+    !!document.getElementById("ask") || !$("#settings").hidden;
+
   addEventListener("keydown", (e) => {
-    // disable app shortcuts while the rename prompt is open, else Ctrl+P reopens it
-    if (document.getElementById("ask")) return;
+    if (modalOpen()) return;
     const hit = keymap.get(chordOf(e));
     if (!hit) return;
     e.preventDefault();
@@ -1849,6 +1873,326 @@
     const km = (cfg && cfg.keymap && Object.keys(cfg.keymap).length) ? cfg.keymap : FALLBACK_KEYMAP;
     setKeymap(km);
   }
+
+
+  // ---------- stale-code banner ----------
+  // Static files are served straight off disk, so after an update the UI is new while the Python
+  // processes are not. From the screen that looks like "the app is broken" - a new panel whose
+  // Save returns 405 - with nothing saying why. This names which process is behind and what
+  // restarting it costs, because those costs are wildly different: reloading loses nothing,
+  // restarting the web server loses nothing, restarting the daemon closes every shell.
+  let staleDismissed = "";
+
+  async function checkStale() {
+    let r;
+    try {
+      r = await fetch(`/api/version?ver=${APP_VER}`).then((x) => x.json());
+    } catch (e) {
+      return;                                  // offline is a different banner's job
+    }
+    const worst = (r.stale || [])[0];          // server/daemon listed after browser: reload first
+    const bar = $("#stale");
+    if (!worst || staleDismissed === worst.what) {
+      bar.hidden = true;
+      document.body.classList.remove("has-stale");
+      return;
+    }
+    $("#stale-text").textContent = `${worst.text} (${worst.cost})`;
+    const act = $("#stale-act");
+    act.textContent = worst.action === "reload" ? "Reload" : "How?";
+    act.onclick = () => {
+      if (worst.action === "reload") return location.reload();
+      // There is no button that can restart a process the page does not own, and pretending
+      // otherwise would be worse than saying so plainly.
+      alert(
+        worst.action === "restart-server"
+          ? "Restart the web server:\\n\\n" +
+            "  Windows:  webterm.exe --restart\\n" +
+            "  macOS/Linux:  Ctrl+C in the terminal running server.py, then run it again\\n\\n" +
+            "Your open shells are held by the session daemon and will survive."
+          : "Restart the session daemon - THIS CLOSES EVERY SHELL:\\n\\n" +
+            "  Windows:  webterm.exe --stop-all, then webterm.exe\\n" +
+            "  macOS/Linux:  pkill -f 'daemon.py', then run server.py again\\n\\n" +
+            "Finish what you are doing in the open panes first."
+      );
+    };
+    $("#stale-x").onclick = () => {
+      staleDismissed = worst.what;
+      bar.hidden = true;
+      document.body.classList.remove("has-stale");
+    };
+    bar.hidden = false;
+    document.body.classList.add("has-stale");
+  }
+
+  checkStale();
+  // On focus rather than on a timer: an update happens while you are away in a terminal or an
+  // editor, so coming back to the tab is exactly the moment the answer may have changed.
+  addEventListener("focus", checkStale);
+
+  // ---------- settings panel ----------
+  // Settings are saved on the SERVER (config.json), not in this browser, so a shortcut rebound
+  // on the phone reaches the PC. `security` is not editable here - see config.py's allowlist.
+  //
+  // The panel edits BINDINGS (chord -> action), not actions. An action-keyed list would be
+  // shorter, but the real keymap has several chords per action (Ctrl+= and Ctrl++ both grow the
+  // font) and nine numbered variants of pane.zoom / tab.select, and all of that would be lost on
+  // the way in and out.
+  const ARG_ACTIONS = new Set(["pane.zoom", "tab.select"]);
+  // Chords the browser takes before the page ever sees them, so binding one is a silent no-op.
+  // The set differs per platform, which is exactly what a user cannot be expected to know.
+  const IS_MAC_UI = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+  const RESERVED = IS_MAC_UI
+    ? ["Ctrl+w", "Ctrl+t", "Ctrl+n", "Ctrl+q", "Ctrl+Shift+w", "Ctrl+Shift+t"]
+    : ["Ctrl+w", "Ctrl+Shift+w", "Ctrl+Shift+t"];
+
+  let stRows = [];                 // [{ chord, id, arg }] - the panel's working copy
+  let stRecording = null;          // the row currently capturing a keystroke
+
+  const stParse = (spec) => {
+    const i = (spec || "").indexOf(":");
+    return i === -1 ? { id: spec || "", arg: "" }
+                    : { id: spec.slice(0, i), arg: spec.slice(i + 1) };
+  };
+
+  let stDefaults = {};              // the keymap as it ships - needed to express a deletion
+
+  function stLoad(cfg) {
+    stDefaults = (cfg && cfg.defaults) || {};
+    const km = (cfg && cfg.keymap && Object.keys(cfg.keymap).length) ? cfg.keymap : FALLBACK_KEYMAP;
+    stRows = Object.entries(km).map(([chord, spec]) => {
+      const p = stParse(spec);
+      return { chord, id: p.id, arg: p.arg };
+    });
+    $("#st-font").value = fontSize;
+    $("#st-cwd").value = (cfg && cfg.defaultCwd) || "";
+    stLoadShells(cfg);
+  }
+
+  // The shell is chosen from what the server actually found on its machine. An empty value means
+  // "this platform's default", which is spelled out in the option so it is not a mystery.
+  function stLoadShells(cfg) {
+    const pick = $("#st-shell");
+    const sel = $("#st-shell-pick");
+    const found = (cfg && cfg.shells) || [];
+    const current = (cfg && cfg.shell) || "";
+    const dflt = (cfg && cfg.defaultShell) || "";
+
+    sel.innerHTML =
+      `<option value="">Default for ${(cfg && cfg.platform) || "this platform"}` +
+      `${dflt ? ` (${dflt})` : ""}</option>` +
+      found.map((sh) => `<option value="${sh.cmd}">${sh.label}</option>`).join("") +
+      '<option value="__CUSTOM__">Custom...</option>';
+
+    const known = current === "" || found.some((sh) => sh.cmd === current);
+    sel.value = known ? current : "__CUSTOM__";
+    pick.value = current;
+    $("#st-shell-custom").hidden = known;
+  }
+
+  // Sentinel for the "Custom..." option. NOT a control character: the HTML parser rewrites NUL in
+  // an attribute value to U+FFFD, so the option value stopped matching what the code compared it
+  // to and the custom field never appeared. A shell command is never literally this string.
+  // Which value actually gets saved: the dropdown, unless "Custom..." is showing.
+  const stShellValue = () =>
+    $("#st-shell-pick").value === "__CUSTOM__" ? $("#st-shell").value : $("#st-shell-pick").value;
+
+  $("#st-shell-pick").onchange = () => {
+    const custom = $("#st-shell-pick").value === "__CUSTOM__";
+    $("#st-shell-custom").hidden = !custom;
+    if (custom) $("#st-shell").focus();
+  };
+
+  function stRender() {
+    const filter = $("#st-filter").value.trim().toLowerCase();
+    const seen = new Map();
+    stRows.forEach((r) => seen.set(r.chord, (seen.get(r.chord) || 0) + 1));
+
+    const opts = ['<option value="">(pass to terminal)</option>']
+      .concat(Object.entries(ACTIONS).map(([id, a]) =>
+        `<option value="${id}">${id} - ${a.desc}</option>`)).join("");
+
+    const host = $("#st-rows");
+    host.innerHTML = "";
+    stRows.forEach((r, i) => {
+      const hay = (r.chord + " " + r.id + " " + ((ACTIONS[r.id] || {}).desc || "")).toLowerCase();
+      if (filter && hay.indexOf(filter) === -1) return;
+      const dup = seen.get(r.chord) > 1;
+      const row = document.createElement("div");
+      row.className = "st-row" + (dup ? " dup" : "");
+      row.innerHTML =
+        `<button class="st-chord" data-i="${i}">${r.chord || "press a key..."}</button>` +
+        `<select data-i="${i}">${opts}</select>` +
+        (ARG_ACTIONS.has(r.id)
+          ? `<input class="st-arg" data-i="${i}" value="${r.arg || ""}" title="argument (e.g. pane number)">`
+          : "") +
+        `<button class="st-del" data-i="${i}" aria-label="Remove">&#10005;</button>`;
+      row.querySelector("select").value = r.id || "";
+      host.appendChild(row);
+      if (dup) {
+        const w = document.createElement("div");
+        w.className = "st-warn";
+        w.textContent = "duplicate shortcut - only the last one would survive";
+        host.appendChild(w);
+      } else if (RESERVED.indexOf(r.chord) !== -1) {
+        const w = document.createElement("div");
+        w.className = "st-warn";
+        w.textContent = "the browser takes this one first - it will never reach webterm";
+        host.appendChild(w);
+      }
+    });
+    if (!host.children.length) {
+      host.innerHTML = '<div class="st-note">Nothing matches that filter.</div>';
+    }
+  }
+
+  // Record a chord: swallow the keystroke instead of letting it run its action.
+  function stRecord(btn, i) {
+    if (stRecording) stRecording.classList.remove("rec");
+    stRecording = btn;
+    btn.classList.add("rec");
+    btn.textContent = "press a key...";
+    const onKey = (e) => {
+      // A bare modifier is the way TO a chord, not a chord - keep listening.
+      if (["Control", "Alt", "Shift", "Meta", "OS"].indexOf(e.key) !== -1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      removeEventListener("keydown", onKey, true);
+      btn.classList.remove("rec");
+      stRecording = null;
+      if (e.key === "Escape") { stRender(); return; }   // Escape = keep what was there
+      stRows[i].chord = chordOf(e);
+      stRender();
+    };
+    addEventListener("keydown", onKey, true);
+  }
+
+  function stMsg(text, kind) {
+    const el = $("#st-msg");
+    el.textContent = text || "";
+    el.className = kind || "";
+  }
+
+  function stOpen() {
+    fetch("/api/config").then((r) => r.json()).then((cfg) => {
+      stLoad(cfg && cfg.ok ? cfg : null);
+      stRender();
+      stMsg("");
+      $("#settings").hidden = false;
+      // Without this the terminal keeps focus and typing goes into the shell behind the panel.
+      // Skipped on phones, where focusing a text field pops the soft keyboard over the list.
+      if (!isPhone) $("#st-filter").focus();
+    }).catch(() => stMsg("could not load settings", "err"));
+  }
+
+  function stClose() {
+    if (stRecording) { stRecording.classList.remove("rec"); stRecording = null; }
+    $("#settings").hidden = true;
+    focusPane(activeSid);
+  }
+
+  async function stPost(body) {
+    const r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || `save failed (${r.status})`);
+    return j.config;
+  }
+
+  // Apply what came BACK from the server, not what we sent - the server is the source of truth
+  // and a rejected or normalised value would otherwise leave the UI lying about what is saved.
+  function stApply(cfg) {
+    if (!cfg) return;
+    DEFAULT_CWD = cfg.defaultCwd || "";
+    setKeymap(cfg.keymap && Object.keys(cfg.keymap).length ? cfg.keymap : FALLBACK_KEYMAP);
+    if (cfg.fontSize) {
+      baseFont = +cfg.fontSize;
+      // A font size set in THIS browser still wins, same rule as on first load.
+      if (localStorage.getItem("webterm.font") === null) setFont(baseFont);
+    }
+  }
+
+  async function stSave() {
+    const keymap = {};
+    for (const r of stRows) {
+      if (!r.chord) continue;
+      keymap[r.chord] = r.id ? (ARG_ACTIONS.has(r.id) && r.arg ? `${r.id}:${r.arg}` : r.id) : "";
+    }
+    // config.json merges into the defaults PER KEY - the property that lets someone hand-edit
+    // only the lines they care about. The cost is that simply omitting a binding here would not
+    // delete it: the shipped one would show through again. So say it explicitly - "" is the
+    // existing "deliberately unbound" value, which the server then filters out of the keymap.
+    for (const chord of Object.keys(stDefaults)) {
+      if (!(chord in keymap)) keymap[chord] = "";
+    }
+    stMsg("saving...");
+    try {
+      const body = { keymap, shell: stShellValue(), defaultCwd: $("#st-cwd").value };
+      const f = parseFloat($("#st-font").value);
+      if (f) body.fontSize = f;
+      const cfg = await stPost(body);
+      stApply(cfg);
+      stLoad(cfg);
+      stRender();
+      stMsg("saved", "ok");
+    } catch (e) {
+      stMsg(e.message, "err");
+    }
+  }
+
+  async function stReset() {
+    if (!confirm("Reset shortcuts, font size, shell and start folder to the defaults?")) return;
+    stMsg("resetting...");
+    try {
+      // null removes the key, so config.default.json shows through again (see config.py).
+      const cfg = await stPost({ keymap: null, fontSize: null, shell: null, defaultCwd: null });
+      stApply(cfg);
+      stLoad(cfg);
+      stRender();
+      stMsg("reset to defaults", "ok");
+    } catch (e) {
+      stMsg(e.message, "err");
+    }
+  }
+
+  $("#settings-open").onclick = stOpen;
+  $("#st-close").onclick = stClose;
+  $("#settings").onmousedown = (e) => { if (e.target.id === "settings") stClose(); };
+  $("#st-filter").oninput = stRender;
+  $("#st-save").onclick = stSave;
+  $("#st-reset").onclick = stReset;
+  $("#st-add").onclick = () => {
+    stRows.push({ chord: "", id: "", arg: "" });
+    $("#st-filter").value = "";
+    stRender();
+    const all = $("#st-rows").querySelectorAll(".st-chord");
+    if (all.length) all[all.length - 1].click();
+  };
+  $("#st-rows").onclick = (e) => {
+    const i = +e.target.dataset.i;
+    if (e.target.classList.contains("st-chord")) stRecord(e.target, i);
+    else if (e.target.classList.contains("st-del")) { stRows.splice(i, 1); stRender(); }
+  };
+  $("#st-rows").onchange = (e) => {
+    const i = +e.target.dataset.i;
+    if (e.target.tagName === "SELECT") { stRows[i].id = e.target.value; stRender(); }
+    else if (e.target.classList.contains("st-arg")) stRows[i].arg = e.target.value;
+  };
+  $(".st-tabs").onclick = (e) => {
+    if (e.target.tagName !== "BUTTON") return;
+    const want = e.target.dataset.pane;
+    document.querySelectorAll(".st-tabs button").forEach((b) => b.classList.toggle("on", b === e.target));
+    document.querySelectorAll(".st-body").forEach((b) => { b.hidden = b.dataset.pane !== want; });
+  };
+  // The panel's own Escape must not reach the terminal or the app shortcut layer.
+  $("#settings").addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape" && !stRecording) stClose();
+  }, true);
 
   // Console helper - shows what can be written in the config file.
   window.webterm = {

@@ -114,6 +114,86 @@ def default_shell():
     return (os.environ.get("SHELL") or fallback) + " -l"
 
 
+# -- Shell discovery -----------------------------------------------------------
+# The settings panel offers a LIST rather than a free-text box. Typing the command by hand means
+# knowing both the executable and the flags it wants (-NoLogo, -l), and a typo produces a pane
+# that just fails to open with no hint as to why.
+#
+# Cached: /api/config is fetched on every page load and this touches the filesystem.
+_shells_cache = None
+
+# (command, label). The command carries the flags, since that is the part nobody should have to
+# remember - see default_shell() for why -NoLogo and -l are there.
+_WIN_CANDIDATES = [
+    ("powershell.exe -NoLogo", "Windows PowerShell"),
+    ("pwsh.exe -NoLogo", "PowerShell 7"),
+    ("cmd.exe", "Command Prompt"),
+    ("wsl.exe", "WSL"),
+    ("bash.exe -l", "Git Bash"),
+]
+# Extra places to look for a shell that may not be on PATH.
+_WIN_EXTRA_PATHS = {
+    "bash.exe -l": [
+        os.path.join(os.environ.get("ProgramFiles", "C:" + os.sep + "Program Files"),
+                     "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
+    ],
+}
+
+
+def _win_shells():
+    import shutil
+
+    found = []
+    for cmd, label in _WIN_CANDIDATES:
+        exe = cmd.split(" ", 1)[0]
+        if shutil.which(exe):
+            found.append({"cmd": cmd, "label": label})
+            continue
+        for path in _WIN_EXTRA_PATHS.get(cmd, []):
+            if os.path.exists(path):
+                rest = cmd.split(" ", 1)[1] if " " in cmd else ""
+                found.append({"cmd": (path + " " + rest).strip(), "label": label})
+                break
+    return found
+
+
+def _posix_shells():
+    """/etc/shells is the system's own answer to "what may a login shell be", so prefer it and
+    fall back to probing if it is missing (some containers have no such file)."""
+    seen, found = set(), []
+    paths = []
+    try:
+        with open("/etc/shells", encoding="utf-8", errors="replace") as f:
+            paths = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    except OSError:
+        paths = []
+    for extra in ("/bin/zsh", "/bin/bash", "/bin/sh", "/usr/bin/fish", "/opt/homebrew/bin/fish"):
+        if extra not in paths:
+            paths.append(extra)
+    current = os.environ.get("SHELL")
+    if current and current not in paths:
+        paths.insert(0, current)
+    for path in paths:
+        if path in seen or not os.path.exists(path):
+            continue
+        seen.add(path)
+        name = os.path.basename(path)
+        found.append({"cmd": f"{path} -l", "label": f"{name}  ({path})"})
+    return found
+
+
+def detect_shells():
+    """Shells that actually exist on this machine, most conventional first.
+
+    The first entry is what `default_shell()` would pick, so the panel can label it.
+    """
+    global _shells_cache
+    if _shells_cache is None:
+        _shells_cache = _win_shells() if IS_WINDOWS else _posix_shells()
+    return _shells_cache
+
+
 # -- OSC 7 (cwd reporting) -----------------------------------------------------
 # Goal: after `cd`, a split (`Ctrl+]`) must open the new pane in THAT folder. The shell has to
 # tell us where it is, and measured (2026-08-26) PowerShell emits none of OSC 7 / 9;9 / title,

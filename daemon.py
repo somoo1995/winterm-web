@@ -48,7 +48,13 @@ logging.basicConfig(
 log = logging.getLogger("webterm.daemon")
 
 sys.path.insert(0, BASE)
+import version  # noqa: E402
 from pty_backend import PtyUnavailable, check_supported, platform_name  # noqa: E402
+
+# Captured at startup, reported over ping. Compared with the files on disk, this is what tells a
+# user whether the daemon they are talking to predates their update - and restarting THIS process
+# is the expensive one, because every shell it owns dies with it.
+RUNNING_CODE = version.daemon_code()
 
 # Fail here, with a sentence, rather than 20 frames down inside an import. The daemon is the
 # process that actually owns the PTYs, so if the platform can't provide one nothing else matters.
@@ -75,7 +81,8 @@ async def send(w, obj):
 async def handle_control(w, msg):
     op = msg.get("op")
     if op == "ping":
-        return {"ok": True, "result": {"pid": os.getpid(), "sessions": len(mgr.sessions)}}
+        return {"ok": True, "result": {"pid": os.getpid(), "sessions": len(mgr.sessions),
+                                       "code": RUNNING_CODE}}
     if op == "list":
         mgr.reap()
         return {"ok": True, "result": {"sessions": mgr.list()}}
