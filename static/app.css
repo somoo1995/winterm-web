@@ -587,3 +587,128 @@ body.phone #scrollpad button:active{ background:var(--tab-hover-bg) }
    Leaving the window with Alt+Tab also loses the keyup, so the class can stick in place.
    app.js clears the stuck class; the cursor shape is killed here. */
 .xterm.column-select.focus{ cursor: default !important }
+
+/* ===== settings panel ===== */
+/* The gear sits next to the clock, but unlike the clock it survives on phones - see index.html. */
+#settings-open{
+  background:transparent; border:0; color:var(--dim); cursor:pointer;
+  font-size:14px; line-height:1; padding:4px 6px; border-radius:6px;
+}
+#settings-open:hover{color:var(--fg); background:var(--tab-hover-bg)}
+
+#settings{
+  position:fixed; inset:0; z-index:60; display:flex;
+  align-items:flex-start; justify-content:center; padding-top:8vh;
+  background:rgba(10,11,18,.55); backdrop-filter:blur(2px);
+}
+.st-panel{
+  display:flex; flex-direction:column;
+  width:min(680px, 94vw); max-height:84vh;
+  background:#16161e; border:1px solid var(--line); border-radius:12px;
+  box-shadow:0 20px 60px rgba(0,0,0,.55); overflow:hidden;
+}
+.st-head{
+  display:flex; align-items:center; gap:10px;
+  padding:12px 14px; border-bottom:1px solid var(--line); font-size:12.5px;
+}
+.st-head span{flex:1}
+.st-head button{background:transparent; border:0; color:var(--dim); cursor:pointer; font:inherit}
+.st-head button:hover{color:var(--fg)}
+
+.st-tabs{display:flex; gap:4px; padding:8px 10px 0; border-bottom:1px solid var(--line)}
+.st-tabs button{
+  padding:7px 13px; border:0; border-bottom:2px solid transparent; border-radius:6px 6px 0 0;
+  background:transparent; color:var(--dim); font:inherit; font-size:12px; cursor:pointer;
+}
+.st-tabs button:hover{color:var(--fg)}
+.st-tabs button.on{color:var(--fg); border-bottom-color:var(--tab-on-bg)}
+
+.st-body{padding:12px 14px; overflow-y:auto; flex:1}
+.st-tools{display:flex; gap:8px; margin-bottom:10px}
+.st-tools input{
+  flex:1; padding:7px 10px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; outline:none;
+}
+.st-tools input:focus{border-color:var(--tab-on-bg)}
+.st-tools button, .st-foot button{
+  padding:7px 12px; background:var(--tab-off-bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; cursor:pointer;
+}
+.st-tools button:hover, .st-foot button:hover{background:var(--tab-hover-bg)}
+.st-foot button.primary{background:var(--tab-on-bg); color:var(--tab-on-fg); border-color:transparent}
+.st-foot button.primary:hover{filter:brightness(1.08)}
+
+.st-row{display:flex; align-items:center; gap:8px; padding:4px 0}
+.st-chord{
+  min-width:132px; padding:6px 10px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:7px; font:inherit; font-size:12px;
+  cursor:pointer; text-align:left; white-space:nowrap;
+}
+.st-chord:hover{border-color:var(--tab-on-bg)}
+/* While recording, the next keystroke is captured instead of firing its action. */
+.st-chord.rec{border-color:var(--orange); color:var(--orange)}
+.st-row select{
+  flex:1; min-width:0; padding:6px 8px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:7px; font:inherit; font-size:12px; outline:none;
+}
+.st-row input.st-arg{
+  width:52px; padding:6px 8px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:7px; font:inherit; font-size:12px; outline:none;
+}
+.st-row .st-del{
+  background:transparent; border:0; color:var(--dim); cursor:pointer; font:inherit; padding:4px 6px;
+}
+.st-row .st-del:hover{color:var(--red)}
+/* A duplicate chord would silently overwrite its twin on save (the keymap is an object). */
+.st-row.dup .st-chord{border-color:var(--red); color:var(--red)}
+.st-warn{font-size:10.5px; color:var(--orange); padding:0 0 4px 140px}
+
+.st-field{display:flex; align-items:center; gap:10px; padding:6px 0; font-size:12px}
+.st-field span{width:104px; color:var(--dim)}
+.st-field input{
+  flex:1; padding:7px 10px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; outline:none;
+}
+.st-field input:focus{border-color:var(--tab-on-bg)}
+
+.st-note{margin-top:10px; font-size:10.5px; color:var(--dim); line-height:1.5}
+.st-foot{
+  display:flex; align-items:center; gap:10px;
+  padding:11px 14px; border-top:1px solid var(--line);
+}
+.st-foot .gap{flex:1}
+#st-msg{font-size:11px; color:var(--dim)}
+#st-msg.err{color:var(--red)}
+#st-msg.ok{color:var(--green)}
+
+/* On a phone the panel is the whole screen - 40 rows need the height, and a centred dialog
+   would sit under the soft keyboard the moment a field is focused. */
+body.phone #settings{padding-top:0}
+body.phone .st-panel{width:100vw; max-height:100vh; height:100vh; border-radius:0; border:0}
+body.phone .st-chord{min-width:108px}
+body.phone .st-warn{padding-left:0}
+.st-field select{
+  flex:1; min-width:0; padding:7px 10px; background:var(--bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; outline:none;
+}
+.st-field select:focus{border-color:var(--tab-on-bg)}
+
+/* ===== stale-code banner ===== */
+/* Deliberately loud and at the very top: the failure it explains looks like "the app is broken"
+   (new UI, buttons returning 405), so a subtle hint would be read as decoration. */
+#stale{
+  position:fixed; top:0; left:0; right:0; z-index:80;
+  display:flex; align-items:center; gap:10px;
+  padding:9px 14px; font-size:12px;
+  background:#3d2f1b; color:#ffd9a0; border-bottom:1px solid var(--orange);
+  padding-top:calc(9px + env(safe-area-inset-top, 0px));
+}
+#stale span{flex:1}
+#stale button{
+  padding:5px 11px; border:1px solid var(--orange); border-radius:7px;
+  background:transparent; color:var(--orange); font:inherit; font-size:11.5px; cursor:pointer;
+}
+#stale button:hover{background:rgba(255,158,100,.15)}
+#stale-x{border:0; color:#ffd9a0; padding:5px 7px}
+/* The banner covers the tab bar, so push everything down while it is up. */
+body.has-stale #tabbar{margin-top:38px}

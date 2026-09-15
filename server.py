@@ -25,6 +25,8 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 import daemon_client as dc
+import pty_backend
+import version
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -63,6 +65,11 @@ except PtyUnavailable as e:
     log.error("cannot start on this platform: %s", str(e).replace("\n", " / "))
     print(f"winterm-web: {e}", file=sys.stderr)
     sys.exit(1)
+
+
+# Same idea as the daemon's: frozen at startup, compared with disk later. Restarting THIS process
+# is the cheap one - the daemon holds the PTYs, so every shell survives.
+RUNNING_CODE = version.server_code()
 
 
 @asynccontextmanager
@@ -390,16 +397,92 @@ async def api_diag(payload: dict = Body(default=None)):
 
 @app.get("/api/config")
 async def api_config():
-    """Return only the settings the front end uses (not server-internal values like the allowlist).
+    """Return only the settings the front end uses (not server-internal values like the allowlist)."""
+    return dict(ok=True, **_public_config(config.load()))
 
-    Config editing is file-only - a write API would let the browser edit server files, a hole this
-    program has no reason to open.
+
+@app.post("/api/config")
+async def api_config_save(payload: dict = Body(...)):
+    """Save settings from the in-app panel.
+
+    This used to be read-only on the reasoning that "a write API would let the browser edit server
+    files, a hole this program has no reason to open". Two things gave it a reason:
+
+      - A phone has no text editor for config.json, and the phone is exactly where a shortcut is
+        hardest to reach. Read-only meant the devices that most need to rebind never could.
+      - Once macOS is supported the keymap has to differ per platform, so "edit the one file by
+        hand" pushes that difference onto the user.
+
+    The hole is narrowed rather than opened: `config.WRITABLE` is an allowlist, and `security` is
+    NOT in it. A page that can switch off the guard protecting it is no guard at all, so the
+    allowlist - not this endpoint's existence - is what keeps the original reasoning intact.
     """
-    c = config.load()
-    return {"ok": True,
-            "defaultCwd": c.get("defaultCwd") or "",
+    try:
+        return {"ok": True, "config": _public_config(config.save(payload))}
+    except config.ConfigError as e:
+        # 400, not 500: the settings were understood and refused, and the panel shows this text.
+        return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except OSError as e:
+        log.error("config save failed: %s", e)
+        return UTF8JSONResponse({"ok": False, "error": f"could not write config.json: {e}"},
+                                status_code=500)
+
+
+def _public_config(c):
+    return {"defaultCwd": c.get("defaultCwd") or "",
+            "shell": c.get("shell") or "",
             "fontSize": c.get("fontSize"),
-            "keymap": config.keymap()}
+            "keymap": config.keymap(),
+            # What ships, so the settings panel can tell "removed" from "never existed".
+            "defaults": config.default_keymap(),
+            # Shells that exist on THIS machine, so the panel can offer a list instead of asking
+            # the user to remember both an executable and its flags.
+            "shells": pty_backend.detect_shells(),
+            "platform": pty_backend.platform_name(),
+            "defaultShell": pty_backend.default_shell()}
+
+
+@app.get("/api/version")
+async def api_version(ver: int = 0):
+    """Is anything running older code than what is on disk - and what should be restarted?
+
+    Three things update independently and are fixed in completely different ways, which is why
+    this answers with an instruction rather than a version number:
+
+        browser   -> reload the page.          Nothing is lost.
+        server    -> restart the web server.   Every shell stays open.
+        daemon    -> restart the daemon.       EVERY SHELL DIES.
+
+    `ver` is the APP_VER of the JS the caller actually loaded. Static files are served straight
+    off disk, so after a pull the UI is already new while these processes are not - that mismatch
+    is invisible from the screen and has cost real debugging time twice.
+    """
+    disk = {"appVer": version.app_ver(),
+            "server": version.server_code(),
+            "daemon": version.daemon_code()}
+    daemon_running = None
+    try:
+        daemon_running = (await dc.request({"op": "ping"}, timeout=3)).get("result", {}).get("code")
+    except Exception:
+        pass                                   # daemon down is a different problem, reported elsewhere
+
+    stale = []
+    if ver and disk["appVer"] and ver != disk["appVer"]:
+        stale.append({"what": "browser", "action": "reload",
+                      "text": "webterm was updated. Reload this page to pick it up.",
+                      "cost": "nothing is lost"})
+    if RUNNING_CODE != disk["server"]:
+        stale.append({"what": "server", "action": "restart-server",
+                      "text": "The web server is running older code than the files on disk.",
+                      "cost": "restarting it keeps every shell open"})
+    # Unknown (daemon unreachable) is not the same as stale - don't cry wolf about killing shells.
+    if daemon_running and daemon_running != disk["daemon"]:
+        stale.append({"what": "daemon", "action": "restart-daemon",
+                      "text": "The session daemon is running older code than the files on disk.",
+                      "cost": "restarting it CLOSES EVERY SHELL"})
+
+    return {"ok": True, "stale": stale, "disk": disk,
+            "running": {"server": RUNNING_CODE, "daemon": daemon_running, "browser": ver or None}}
 
 
 @app.get("/api/health")

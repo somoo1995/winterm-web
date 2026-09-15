@@ -67,6 +67,18 @@ def keymap():
     return {k: v for k, v in (load().get("keymap") or {}).items() if v}
 
 
+def default_keymap():
+    """The keymap as it SHIPS, before config.json is merged on top.
+
+    The settings panel needs this to express a deletion. Because config.json merges per key - the
+    property that lets someone hand-edit only the bindings they care about - a binding the panel
+    dropped would keep showing through from the defaults. Knowing the defaults, the panel can send
+    "" (deliberately unbound) for those instead, which `keymap()` above then filters out.
+    """
+    km = _strip_readme(_read(DEFAULT_PATH)).get("keymap") or {}
+    return {k: v for k, v in km.items() if v}
+
+
 # -- Origin checks -------------------------------------------------------------
 # Access control itself is the network's job (a private network / Tailscale). What we block
 # here is only what that can't stop - an attack from the user's OWN browser hitting loopback.
@@ -126,3 +138,104 @@ def origin_allowed(origin):
     except Exception:
         return False
     return _matches(host, allowed)
+
+
+# -- Saving (the in-app settings panel) ----------------------------------------
+# Writes land in config.json (the user file), never in config.default.json - the defaults stay
+# a readable record of what shipped, and deleting config.json always restores them.
+#
+# `security` is deliberately NOT writable here. That guard exists to survive a hostile page
+# reaching this server, and a guard a page can switch off is not a guard. It stays file-only.
+WRITABLE = ("keymap", "fontSize", "shell", "defaultCwd")
+
+MAX_BINDINGS = 300
+MAX_CHORD = 40
+MAX_ACTION = 60
+
+
+class ConfigError(ValueError):
+    """Rejected settings. The message is shown to the user, so say what to fix."""
+
+
+def _validate(patch):
+    """Return (cleaned patch, keys to remove), or raise ConfigError.
+
+    A null value means REMOVE that key from config.json, which is how "reset to defaults" works:
+    merging an empty object would leave the old values in place, so the override has to be deleted
+    for config.default.json to show through again.
+
+    Unknown keys are an error, not a silent drop - a typo that vanishes quietly reads as
+    'I saved it and nothing happened'.
+    """
+    if not isinstance(patch, dict):
+        raise ConfigError("settings must be an object")
+    unknown = [k for k in patch if k not in WRITABLE]
+    if unknown:
+        raise ConfigError("not writable from here: " + ", ".join(sorted(unknown)))
+
+    remove = [k for k, v in patch.items() if v is None]
+    patch = {k: v for k, v in patch.items() if v is not None}
+
+    out = {}
+    if "keymap" in patch:
+        km = patch["keymap"]
+        if not isinstance(km, dict):
+            raise ConfigError("keymap must be an object")
+        if len(km) > MAX_BINDINGS:
+            raise ConfigError(f"too many bindings (max {MAX_BINDINGS})")
+        clean = {}
+        for chord, action in km.items():
+            if not isinstance(chord, str) or not isinstance(action, str):
+                raise ConfigError("keymap entries must be text")
+            chord = chord.strip()
+            action = action.strip()
+            if not chord or len(chord) > MAX_CHORD:
+                raise ConfigError(f"bad chord: {chord[:MAX_CHORD]!r}")
+            if len(action) > MAX_ACTION:
+                raise ConfigError(f"bad action: {action[:MAX_ACTION]!r}")
+            clean[chord] = action          # "" is meaningful: deliberately unbound
+        out["keymap"] = clean
+
+    if "fontSize" in patch:
+        try:
+            size = float(patch["fontSize"])
+        except (TypeError, ValueError):
+            raise ConfigError("fontSize must be a number")
+        if not 6 <= size <= 48:
+            raise ConfigError("fontSize must be between 6 and 48")
+        out["fontSize"] = size
+
+    for key, limit in (("shell", 300), ("defaultCwd", 1000)):
+        if key in patch:
+            val = patch[key]
+            if not isinstance(val, str):
+                raise ConfigError(f"{key} must be text")
+            if len(val) > limit:
+                raise ConfigError(f"{key} is too long (max {limit})")
+            out[key] = val.strip()
+
+    return out, remove
+
+
+def save(patch):
+    """Merge `patch` into config.json and return the config as it now reads.
+
+    Written atomically: a half-written config.json would break every future start, and this is
+    reachable from a phone on a flaky link. Keys already in the file that we don't touch
+    (`security`, hand-written comments' neighbours) survive untouched.
+    """
+    clean, remove = _validate(patch)
+    current = _read(USER_PATH)
+    merged = _merge(current, clean)
+    for key in remove:
+        merged.pop(key, None)
+
+    tmp = USER_PATH + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, USER_PATH)             # atomic on both Windows and POSIX
+    log.info("config saved - set: %s / reset: %s",
+             ", ".join(sorted(clean)) or "-", ", ".join(sorted(remove)) or "-")
+    return load(force=True)
