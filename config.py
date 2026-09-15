@@ -146,7 +146,10 @@ def origin_allowed(origin):
 #
 # `security` is deliberately NOT writable here. That guard exists to survive a hostile page
 # reaching this server, and a guard a page can switch off is not a guard. It stays file-only.
-WRITABLE = ("keymap", "fontSize", "shell", "defaultCwd")
+WRITABLE = ("keymap", "fontSize", "shell", "defaultCwd", "language")
+
+# Kept in step with static/i18n.js. Two places, but the alternative is the server parsing JS.
+LANGUAGES = ("en", "ko")
 
 MAX_BINDINGS = 300
 MAX_CHORD = 40
@@ -204,6 +207,16 @@ def _validate(patch):
         if not 6 <= size <= 48:
             raise ConfigError("fontSize must be between 6 and 48")
         out["fontSize"] = size
+
+    if "language" in patch:
+        lang = patch["language"]
+        if not isinstance(lang, str):
+            raise ConfigError("language must be text")
+        # "" means follow the browser. An unknown code would silently fall back to English, which
+        # reads as "the setting did nothing", so reject it instead.
+        if lang and lang not in LANGUAGES:
+            raise ConfigError("unknown language: " + lang + " (have: " + ", ".join(LANGUAGES) + ")")
+        out["language"] = lang
 
     for key, limit in (("shell", 300), ("defaultCwd", 1000)):
         if key in patch:

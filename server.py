@@ -431,6 +431,8 @@ async def api_config_save(payload: dict = Body(...)):
 def _public_config(c):
     return {"defaultCwd": c.get("defaultCwd") or "",
             "shell": c.get("shell") or "",
+            # "" = follow the browser's language (see i18n.js)
+            "language": c.get("language") or "",
             "fontSize": c.get("fontSize"),
             "keymap": config.keymap(),
             # What ships, so the settings panel can tell "removed" from "never existed".
