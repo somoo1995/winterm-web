@@ -54,3 +54,11 @@ jobs:
 
       - name: Self-check
         run: python tools/selfcheck.py
+
+      # The runner's $SHELL is bash, but macOS has defaulted to zsh since Catalina - so the
+      # shell a real user gets is NOT the one the step above exercised. Run it again, pinned.
+      - name: Self-check (zsh - the real macOS default)
+        if: runner.os == 'macOS'
+        env:
+          WEBTERM_SHELL: /bin/zsh -l
+        run: python tools/selfcheck.py
