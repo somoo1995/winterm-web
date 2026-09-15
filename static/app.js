@@ -19,7 +19,12 @@
   const $ = (s) => document.querySelector(s);
   // UI language lives in i18n.js; English is the per-key fallback, so a missing Korean
   // entry shows English rather than a blank control.
-  const t = (k, p) => window.i18n.t(k, p);
+  //
+  // Named `tr`, not `t`: this file already uses `t` as a local in a dozen places, and one of
+  // them (`const t = v.trim()` in renameTab) sat in the same function as a call to it. `const`
+  // shadows the whole block, so the call hit the temporal dead zone and threw before the rename
+  // dialog could open - a crash with no visible error, on every platform.
+  const tr = (k, p) => window.i18n.t(k, p);
   // Start folder for new tabs. Empty means the server decides:
   //   config.json defaultCwd -> env WEBTERM_CWD -> user home.
   // Never hardcode a personal absolute path: it ships in the public repo and
@@ -82,7 +87,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 116;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 117;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1141,7 +1146,7 @@
   // reused; creating a new one each time can leave a stale picker open on Android.
   let fileInput = null;
   const pickAndUpload = () => {
-    if (!panes.get(activeSid)) { flash(t("msg.noPane")); return; }
+    if (!panes.get(activeSid)) { flash(tr("msg.noPane")); return; }
     if (!fileInput) {
       fileInput = document.createElement("input");
       fileInput.type = "file";
@@ -1164,7 +1169,7 @@
     const fd = new FormData();
     let total = 0;
     for (const f of files) { fd.append("files", f, f.name); total += f.size; }
-    flash(t("msg.uploading", { n: files.length }));
+    flash(tr("msg.uploading", { n: files.length }));
     fetch("/api/upload", { method: "POST", body: fd })
       .then((r) => r.json())
       .then((j) => {
@@ -1173,12 +1178,12 @@
         // them with a space is safe
         pasteText(p, j.files.map((f) => f.path).join(" "));
         const kb = Math.round(total / 1024);
-        flash(t("msg.uploaded", { n: j.files.length,
+        flash(tr("msg.uploaded", { n: j.files.length,
                                  size: kb > 1024 ? (kb / 1024).toFixed(1) + "MB" : kb + "KB" }));
         if (j.errors && j.errors.length) diag({ ev: "upload-partial", errors: j.errors });
       })
       .catch((e) => {
-        flash(t("msg.uploadFailed"));
+        flash(tr("msg.uploadFailed"));
         diag({ ev: "upload-fail", n: files.length, bytes: total, err: String(e && e.message || e) });
       });
   };
@@ -1244,7 +1249,7 @@
 
   const pasteClipboard = (pcFirst) => {
     const p = panes.get(activeSid);
-    if (!p) { flash(t("msg.noPane")); return; }
+    if (!p) { flash(tr("msg.noPane")); return; }
     const first  = pcFirst ? readPcClip : readPhoneClip;
     const second = pcFirst ? readPhoneClip : readPcClip;
     // Try the other source when the first one fails OR comes back empty: a denied phone
@@ -1254,10 +1259,10 @@
       .catch(() => second())
       .then((t) => {
         if (t && t.length) pasteText(p, t);
-        else flash(t("msg.clipEmpty"));
+        else flash(tr("msg.clipEmpty"));
       })
       .catch((e) => {
-        flash(t("msg.pasteFailed"));
+        flash(tr("msg.pasteFailed"));
         diag({ ev: "paste-fail", pcFirst: !!pcFirst, err: String(e && e.message || e) });
       });
   };
@@ -1483,8 +1488,8 @@
     const s = sessOf(sid);
     if (!s) return;
     const many = tabPanes(s.name).length > 1;
-    if (!confirm(many ? t("msg.closePane", { name: s.name })
-                      : t("msg.closeTab", { name: s.name }))) return;
+    if (!confirm(many ? tr("msg.closePane", { name: s.name })
+                      : tr("msg.closeTab", { name: s.name }))) return;
     await api.kill(sid);
     if (zoomSid === sid) setZoom(null);
     await refresh();
@@ -1492,7 +1497,7 @@
   async function closeTab(name) {
     const ps = tabPanes(name);
     if (!ps.length) return;
-    if (!confirm(t("msg.closeTabPanes", { name: name, n: ps.length }))) return;
+    if (!confirm(tr("msg.closeTabPanes", { name: name, n: ps.length }))) return;
     for (const p of ps) await api.kill(p.sid);
     await refresh();
   }
@@ -1502,20 +1507,20 @@
     const s = sessOf(sid);
     if (!s) return;
     const i = tabPanes(s.name).findIndex(p => p.sid === sid);
-    const v = await ask(t("msg.paneName", { n: i + 1 }), paneLabel(sid));
+    const v = await ask(tr("msg.paneName", { n: i + 1 }), paneLabel(sid));
     if (v === null) return;
     // (tab name, label) is a composite key. The daemon validates it (direct API calls are
     // rejected too); here we only report the result.
     const r = await api.label(sid, v.trim());   // an empty string reverts to automatic
     if (r && r.ok === false) {
-      alert(r.error || t("msg.renameFailed"));
+      alert(r.error || tr("msg.renameFailed"));
       return renamePane(sid);                   // ask again instead of discarding the input
     }
     await refresh(true);                        // the label only shows after a list refresh
   }
 
   async function renameTab(name) {
-    const v = await ask(t("msg.tabName"), name);
+    const v = await ask(tr("msg.tabName"), name);
     if (v === null) return;
     const t = v.trim();
     if (!t || t === name) return;
@@ -1523,7 +1528,7 @@
     // break the (tab, pane label) composite key, so it answers 409.
     const r = await api.renameTab(name, t);
     if (r && r.ok === false) {
-      alert(r.error || t("msg.renameTabFailed"));
+      alert(r.error || tr("msg.renameTabFailed"));
       return renameTab(name);      // ask again instead of discarding the input
     }
     if (activeTab === name) activeTab = t;
@@ -1692,7 +1697,7 @@
     // renegotiate the size: also check renderer, socket and viewport, and repaint
     // everything (see `healPanes`).
     healPanes("refit");
-    flash(t("msg.fitToScreen", { c: c, r: r }));
+    flash(tr("msg.fitToScreen", { c: c, r: r }));
   }
 
   // ---------- fit to screen (pin) ----------
@@ -1907,13 +1912,13 @@
     }
     $("#stale-text").textContent = `${worst.text} (${worst.cost})`;
     const act = $("#stale-act");
-    act.textContent = t(worst.action === "reload" ? "stale.reload" : "stale.how");
+    act.textContent = tr(worst.action === "reload" ? "stale.reload" : "stale.how");
     act.onclick = () => {
       if (worst.action === "reload") return location.reload();
       // There is no button that can restart a process the page does not own, and pretending
       // otherwise would be worse than saying so plainly.
-      alert(t(worst.action === "restart-server"
-               ? "stale.serverHelp" : "stale.daemonHelp"));
+      alert(tr(worst.action === "restart-server"
+                ? "stale.serverHelp" : "stale.daemonHelp"));
     };
     $("#stale-x").onclick = () => {
       staleDismissed = worst.what;
@@ -1969,7 +1974,7 @@
 
     const lang = $("#st-lang");
     lang.innerHTML =
-      `<option value="">${t("st.langAuto", { lang: window.i18n.autoLabel() })}</option>` +
+      `<option value="">${tr("st.langAuto", { lang: window.i18n.autoLabel() })}</option>` +
       window.i18n.langs.map((l) => `<option value="${l.code}">${l.label}</option>`).join("");
     lang.value = (cfg && cfg.language) || "";
   }
@@ -1984,10 +1989,10 @@
     const dflt = (cfg && cfg.defaultShell) || "";
 
     sel.innerHTML =
-      `<option value="">${t("st.defaultFor", { platform: (cfg && cfg.platform) || "?" })}` +
+      `<option value="">${tr("st.defaultFor", { platform: (cfg && cfg.platform) || "?" })}` +
       `${dflt ? ` (${dflt})` : ""}</option>` +
       found.map((sh) => `<option value="${sh.cmd}">${sh.label}</option>`).join("") +
-      `<option value="__CUSTOM__">${t("st.custom")}</option>`;
+      `<option value="__CUSTOM__">${tr("st.custom")}</option>`;
 
     const known = current === "" || found.some((sh) => sh.cmd === current);
     sel.value = known ? current : "__CUSTOM__";
@@ -2013,7 +2018,7 @@
     const seen = new Map();
     stRows.forEach((r) => seen.set(r.chord, (seen.get(r.chord) || 0) + 1));
 
-    const opts = [`<option value="">${t("st.passThrough")}</option>`]
+    const opts = [`<option value="">${tr("st.passThrough")}</option>`]
       .concat(Object.entries(ACTIONS).map(([id, a]) =>
         `<option value="${id}">${id} - ${a.desc}</option>`)).join("");
 
@@ -2026,10 +2031,10 @@
       const row = document.createElement("div");
       row.className = "st-row" + (dup ? " dup" : "");
       row.innerHTML =
-        `<button class="st-chord" data-i="${i}">${r.chord || t("st.pressKey")}</button>` +
+        `<button class="st-chord" data-i="${i}">${r.chord || tr("st.pressKey")}</button>` +
         `<select data-i="${i}">${opts}</select>` +
         (ARG_ACTIONS.has(r.id)
-          ? `<input class="st-arg" data-i="${i}" value="${r.arg || ""}" title="${t('st.argTitle')}">`
+          ? `<input class="st-arg" data-i="${i}" value="${r.arg || ""}" title="${tr('st.argTitle')}">`
           : "") +
         `<button class="st-del" data-i="${i}" aria-label="Remove">&#10005;</button>`;
       row.querySelector("select").value = r.id || "";
@@ -2037,17 +2042,17 @@
       if (dup) {
         const w = document.createElement("div");
         w.className = "st-warn";
-        w.textContent = t("st.dupWarn");
+        w.textContent = tr("st.dupWarn");
         host.appendChild(w);
       } else if (RESERVED.indexOf(r.chord) !== -1) {
         const w = document.createElement("div");
         w.className = "st-warn";
-        w.textContent = t("st.reservedWarn");
+        w.textContent = tr("st.reservedWarn");
         host.appendChild(w);
       }
     });
     if (!host.children.length) {
-      host.innerHTML = `<div class="st-note">${t("st.noMatch")}</div>`;
+      host.innerHTML = `<div class="st-note">${tr("st.noMatch")}</div>`;
     }
   }
 
@@ -2056,7 +2061,7 @@
     if (stRecording) stRecording.classList.remove("rec");
     stRecording = btn;
     btn.classList.add("rec");
-    btn.textContent = t("st.pressKey");
+    btn.textContent = tr("st.pressKey");
     const onKey = (e) => {
       // A bare modifier is the way TO a chord, not a chord - keep listening.
       if (["Control", "Alt", "Shift", "Meta", "OS"].indexOf(e.key) !== -1) return;
@@ -2088,7 +2093,7 @@
       // Without this the terminal keeps focus and typing goes into the shell behind the panel.
       // Skipped on phones, where focusing a text field pops the soft keyboard over the list.
       if (!isPhone) $("#st-filter").focus();
-    }).catch(() => stMsg(t("st.loadFailed"), "err"));
+    }).catch(() => stMsg(tr("st.loadFailed"), "err"));
   }
 
   function stClose() {
@@ -2137,7 +2142,7 @@
     for (const chord of Object.keys(stDefaults)) {
       if (!(chord in keymap)) keymap[chord] = "";
     }
-    stMsg(t("st.saving"));
+    stMsg(tr("st.saving"));
     try {
       const body = { keymap, shell: stShellValue(), defaultCwd: $("#st-cwd").value,
                      language: $("#st-lang").value };
@@ -2147,15 +2152,15 @@
       stApply(cfg);
       stLoad(cfg);
       stRender();
-      stMsg(t("st.saved"), "ok");
+      stMsg(tr("st.saved"), "ok");
     } catch (e) {
       stMsg(e.message, "err");
     }
   }
 
   async function stReset() {
-    if (!confirm(t("st.resetConfirm"))) return;
-    stMsg(t("st.resetting"));
+    if (!confirm(tr("st.resetConfirm"))) return;
+    stMsg(tr("st.resetting"));
     try {
       // null removes the key, so config.default.json shows through again (see config.py).
       const cfg = await stPost({ keymap: null, fontSize: null, shell: null,
@@ -2163,7 +2168,7 @@
       stApply(cfg);
       stLoad(cfg);
       stRender();
-      stMsg(t("st.resetDone"), "ok");
+      stMsg(tr("st.resetDone"), "ok");
     } catch (e) {
       stMsg(e.message, "err");
     }
@@ -2248,7 +2253,7 @@
   $("#new-tab").oncontextmenu = async (e) => {
     e.preventDefault();
     const cur = sessOf(activeSid);
-    const cwd = await ask(t("msg.newTabCwd"), cur ? cur.cwd : DEFAULT_CWD);
+    const cwd = await ask(tr("msg.newTabCwd"), cur ? cur.cwd : DEFAULT_CWD);
     if (cwd && cwd.trim()) newTab(cwd.trim());
   };
 
@@ -2559,7 +2564,7 @@
           lockScroll(p);                    // lock for whoever ignores that switch
           p.term.select(c.col, c.row, 1);
           if (navigator.vibrate) navigator.vibrate(15);   // the only signal that selection mode began
-          flash(t("msg.dragHint"));
+          flash(tr("msg.dragHint"));
         }, 450);
       }, { passive: true });
 
@@ -2604,11 +2609,11 @@
         }
         const text = p.term.getSelection();
         diag({ ev: "lp-end", moved: true, len: (text || "").length });   // temporary diagnostic
-        if (!text || !text.trim()) { flash(t("msg.nothingSelected")); return true; }
+        if (!text || !text.trim()) { flash(tr("msg.nothingSelected")); return true; }
         // writeText is allowed only inside a user gesture, and a touchend handler is one.
         // (Outside a secure context the API is missing and `copyToClipboard` falls back.)
         copyToClipboard(text);
-        flash(t("msg.copied", { n: text.length }));
+        flash(tr("msg.copied", { n: text.length }));
         return true;
       };
 
