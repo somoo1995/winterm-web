@@ -87,7 +87,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 117;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 118;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1756,6 +1756,14 @@
     "pane.split.v": { desc: "split pane top/bottom",        run: () => splitPane("v") },
     "pane.zoom":    { desc: "fullscreen pane N",     run: (n) => zoomPane(+n - 1) },
     "pane.unzoom":  { desc: "unzoom",               run: () => { setZoom(null); renderPanes(); } },
+    // Zoom THIS pane, no number needed. Double-click and the context menu already did exactly
+    // this, but `pane.zoom` takes a pane number, so there was nothing a key could be bound to
+    // for "fullscreen whatever I am in" - the one WezTerm had on Leader+z.
+    "pane.zoom.toggle": { desc: "fullscreen this pane on/off", run: () => {
+                        const ps = tabPanes(activeTab);
+                        const i = ps.findIndex((x) => x.sid === activeSid);
+                        if (i >= 0) zoomPane(i);
+                      } },
     "pane.prev":    { desc: "previous pane",             run: () => cyclePane(-1) },
     "pane.next":    { desc: "next pane",             run: () => cyclePane(1) },
     "pane.close":   { desc: "close pane",             run: () => { if (activeSid) closePane(activeSid); } },
@@ -1822,7 +1830,8 @@
     "Ctrl+]": "pane.split.h", "Ctrl+\\": "pane.split.v",
     "Ctrl+n": "tab.new", "Ctrl+t": "tab.rename", "Ctrl+p": "pane.rename",
     "Ctrl+arrowleft": "tab.prev", "Ctrl+arrowright": "tab.next",
-    "Alt+0": "pane.unzoom", "Alt+arrowleft": "pane.prev", "Alt+arrowright": "pane.next",
+    "Alt+0": "pane.unzoom", "Alt+z": "pane.zoom.toggle",
+    "Alt+arrowleft": "pane.prev", "Alt+arrowright": "pane.next",
     "Alt+x": "pane.close", "Alt+b": "rail.toggle", "Alt+r": "view.refit",
     "Ctrl+=": "font.inc", "Ctrl+-": "font.dec", "Ctrl+0": "font.reset",
   };
@@ -2056,26 +2065,52 @@
     }
   }
 
+  const MODIFIER_KEYS = ["Control", "Alt", "Shift", "Meta", "OS", "AltGraph"];
+
+  // The modifiers currently down, spelled the way a chord is.
+  const modPrefix = (e) =>
+    (e.ctrlKey || e.metaKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "");
+
   // Record a chord: swallow the keystroke instead of letting it run its action.
   function stRecord(btn, i) {
     if (stRecording) stRecording.classList.remove("rec");
     stRecording = btn;
     btn.classList.add("rec");
     btn.textContent = tr("st.pressKey");
+
+    // Show the modifiers as they go down. Without this, holding Option changes nothing on
+    // screen and the recorder looks like it cannot see the key at all.
+    const showHeld = (e) => {
+      if (stRecording !== btn) return;
+      const p = modPrefix(e);
+      btn.textContent = p ? p + "\u2026" : tr("st.pressKey");
+    };
+    // While recording, report the raw event too. A modifier that behaves differently on some
+    // platform is otherwise invisible without devtools, which a PWA window barely has.
+    const showRaw = (e) => stMsg(`key=${e.key} code=${e.code || "-"} ${modPrefix(e) || "(no modifier)"}`);
+
+    const stop = () => {
+      removeEventListener("keydown", onKey, true);
+      removeEventListener("keyup", showHeld, true);
+      btn.classList.remove("rec");
+      stRecording = null;
+      stMsg("");
+    };
+
     const onKey = (e) => {
-      // A bare modifier is the way TO a chord, not a chord - keep listening.
-      if (["Control", "Alt", "Shift", "Meta", "OS"].indexOf(e.key) !== -1) return;
+      showRaw(e);
+      // A bare modifier is the way TO a chord, not a chord - keep listening, but show it.
+      if (MODIFIER_KEYS.indexOf(e.key) !== -1) { showHeld(e); return; }
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
-      removeEventListener("keydown", onKey, true);
-      btn.classList.remove("rec");
-      stRecording = null;
+      stop();
       if (e.key === "Escape") { stRender(); return; }   // Escape = keep what was there
       stRows[i].chord = chordOf(e);
       stRender();
     };
     addEventListener("keydown", onKey, true);
+    addEventListener("keyup", showHeld, true);
   }
 
   function stMsg(text, kind) {
