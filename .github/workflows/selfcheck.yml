@@ -62,3 +62,9 @@ jobs:
         env:
           WEBTERM_SHELL: /bin/zsh -l
         run: python tools/selfcheck.py
+
+      # selfcheck drives SessionManager in-process. This boots the actual web server and goes
+      # through HTTP, which is the only way to exercise server.py importing, the static/mimetype
+      # setup, and the server auto-spawning a DETACHED daemon.
+      - name: Smoke test (real server over HTTP)
+        run: python tools/smoketest.py
