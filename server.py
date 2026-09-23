@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 import config
 import daemon_client as dc
 import pty_backend
+import updatecheck
 import version
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -76,7 +77,20 @@ RUNNING_CODE = version.server_code()
 async def lifespan(app):
     ok = await dc.ensure_daemon()
     log.info("webterm started (daemon connection %s), static=%s", "OK" if ok else "FAIL", STATIC)
+
+    # "A new version is available" - checked in the background, never on a request. First look
+    # a little after boot (the daemon and the first page load come first), then every few hours.
+    async def _update_loop():
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await updatecheck.check()
+            except Exception as e:                 # a broken check must never take the server down
+                log.info("update check crashed: %s", e)
+            await asyncio.sleep(updatecheck.CHECK_EVERY)
+    upd = asyncio.create_task(_update_loop())
     yield
+    upd.cancel()
     # The daemon holds the sessions, so nothing is cleaned up here - that's the point of the split
     log.info("webterm stopped (sessions stay alive in the daemon)")
 
@@ -428,12 +442,29 @@ async def api_config_save(payload: dict = Body(...)):
                                 status_code=500)
 
 
+def _os_build():
+    """Windows build number (e.g. 26100), or 0 elsewhere."""
+    if not sys.platform.startswith("win"):
+        return 0
+    try:
+        return int(sys.getwindowsversion().build)
+    except Exception:
+        return 0
+
+
 def _public_config(c):
     return {"defaultCwd": c.get("defaultCwd") or "",
             "shell": c.get("shell") or "",
             # "" = follow the browser's language (see i18n.js)
             "language": c.get("language") or "",
             "fontSize": c.get("fontSize"),
+            # "" = the built-in stack (JetBrains Mono + Sarasa Fixed K). A name here is put in
+            # FRONT of that stack, so a missing glyph still falls through to the bundled fonts.
+            "fontFamily": c.get("fontFamily") or "",
+            # xterm's `windowsPty.buildNumber`: it decides whether xterm reflows its own buffer on
+            # resize (ConPTY >= 21376 reflows too). Passing the real build makes that choice
+            # explicit instead of xterm guessing from an absent value.
+            "osBuild": _os_build(),
             "keymap": config.keymap(),
             # What ships, so the settings panel can tell "removed" from "never existed".
             "defaults": config.default_keymap(),
@@ -483,8 +514,67 @@ async def api_version(ver: int = 0):
                       "text": "The session daemon is running older code than the files on disk.",
                       "cost": "restarting it CLOSES EVERY SHELL"})
 
-    return {"ok": True, "stale": stale, "disk": disk,
+    # Newer code on GitHub than on this disk. Listed LAST: a process that is behind the disk is
+    # fixed first (cheap and local), and an update would only put the disk further ahead.
+    upd = updatecheck.public()
+    if upd["available"] and not stale:
+        stale.append({"what": "update", "action": "update",
+                      "text": "A new version of webterm is available.",
+                      "cost": "downloads the files; you then restart the web server (shells stay open)",
+                      "remote": upd["remote"], "local": upd["local"]})
+
+    return {"ok": True, "stale": stale, "disk": disk, "update": upd,
             "running": {"server": RUNNING_CODE, "daemon": daemon_running, "browser": ver or None}}
+
+
+@app.post("/api/update")
+async def api_update():
+    """Start the in-place update (tools/update.ps1). Returns at once; the files change over the
+    next ~30s and /api/version then reports which process to restart."""
+    ok, msg = updatecheck.start_update()
+    if not ok:
+        return UTF8JSONResponse({"ok": False, "error": msg}, status_code=400)
+    log.info("update started by the browser")
+    return {"ok": True, "status": msg}
+
+
+@app.post("/api/update/check")
+async def api_update_check():
+    """Look at GitHub now instead of waiting for the periodic check."""
+    return {"ok": True, "update": updatecheck.public(),
+            "state": (await updatecheck.check(force=True)) and updatecheck.public()}
+
+
+@app.post("/api/restart-server")
+async def api_restart_server():
+    """Restart the web server through the launcher. The daemon - and every shell - stays up.
+
+    This used to be a "How?" alert with a command to type, on the reasoning that a page cannot
+    restart a process it does not own. It can ask the launcher to, which is what the command in
+    that alert did anyway; the daemon is deliberately NOT restartable from here, because that
+    closes every shell and must stay a decision the user makes at a keyboard."""
+    ok, msg = updatecheck.restart_server()
+    if not ok:
+        return UTF8JSONResponse({"ok": False, "error": msg}, status_code=400)
+    log.info("web server restart requested by the browser")
+    return {"ok": True, "status": msg}
+
+
+@app.post("/api/restart-daemon")
+async def api_restart_daemon(payload: dict = Body(default=None)):
+    """Restart the session daemon (and the web server). THIS CLOSES EVERY SHELL.
+
+    The body must carry `confirm: "close-all-shells"`. The browser only sends that after a
+    dialog that shows how many sessions are alive; a script or skill poking the API by accident
+    gets a 400 instead of killing someone's work."""
+    if not payload or payload.get("confirm") != "close-all-shells":
+        return UTF8JSONResponse({"ok": False, "error": "confirm: \"close-all-shells\" required"},
+                                status_code=400)
+    ok, msg = updatecheck.restart_daemon()
+    if not ok:
+        return UTF8JSONResponse({"ok": False, "error": msg}, status_code=400)
+    log.info("DAEMON restart requested by the browser - all sessions will end")
+    return {"ok": True, "status": msg}
 
 
 @app.get("/api/health")
@@ -917,6 +1007,57 @@ async def api_capture(sid: str):
 _client_sizes = {}          # {sid: {client_id: (cols, rows)}}
 _applied_size = {}          # {sid: (cols, rows)} - last value sent to the daemon
 _last_report = {}           # {sid: (cols, rows)} - most recently reported size (= current owner)
+# Every browser socket attached to a session, so a size decision can be PUSHED to all of them.
+# Before this, a follower learned a new PTY size only from the 4s session poll. In that window
+# its xterm still had the old cell count while the stream was already laid out for the new one,
+# so the TUI's cursor-addressed redraw landed in the wrong cells and stayed there until the next
+# full repaint. The push closes that window: the size frame is sent before the daemon has even
+# read the resize, so on the browser's socket it always precedes the output drawn at that size.
+_ws_by_sid = {}             # {sid: set(WebSocket)}
+
+
+def _size_frame(cols, rows, applied=True):
+    """Control frame for the browser. Binary on purpose: text frames are terminal output verbatim
+    (`term.write`), and there is no byte sequence a shell can be trusted never to print."""
+    return json.dumps({"t": "size", "c": cols, "r": rows, "applied": applied}).encode("utf-8")
+
+
+async def _push_size(sid, cols, rows, only=None):
+    targets = [only] if only is not None else list(_ws_by_sid.get(sid) or ())
+    for w in targets:
+        try:
+            await w.send_bytes(_size_frame(cols, rows))
+        except Exception:
+            pass                        # a dying socket is cleaned up by its own handler
+
+
+async def _kick(sid, att, why):
+    """Make the app repaint the whole screen: shrink the PTY by one column and restore it.
+
+    ConPTY does not send frames, it sends the DIFFERENCE against its own model of the screen.
+    Whenever a browser's xterm drifts from that model - a reconnect that replays the stream from
+    an arbitrary point in the ring buffer, a chunk dropped for a lagging client, a resize that the
+    two sides reflowed differently - the drift stays on screen until something forces a complete
+    repaint (screenshot of 2026-09-23: a spinner line overprinted on `ls` output, `Cul` stubs down
+    the left edge). A resize is the one event that makes ConPTY redraw everything, so this is the
+    same trick the "refresh" button used by hand, now run by the server where it costs nothing.
+
+    Daemon-side only: the browsers keep their cell count. If they were told about the c-1 step
+    they would reflow twice for nothing.
+    """
+    cur = _applied_size.get(sid)
+    if not cur:
+        return
+    c, r = cur
+    if c < 3:
+        return
+    try:
+        await att.resize(c - 1, r)
+        await asyncio.sleep(0.15)
+        await att.resize(c, r)
+        log.info("kick sid=%s %dx%d (%s)", sid, c, r, why)
+    except Exception as e:
+        log.info("kick failed sid=%s: %s", sid, e)
 
 
 def _best_size(sid):
@@ -999,6 +1140,10 @@ async def _sync_size(sid, att, force=None, owner=None):
                  sid, target[0], target[1],
                  "forced" if _forced_size.get(sid) else "reporter",
                  owner or "-", who)
+        # Everyone - the owner included - applies the size from this frame, never from its own
+        # measurement. One source of truth for the cell count.
+        await _push_size(sid, target[0], target[1])
+    return target
 
 
 @app.websocket("/ws/{sid}")
@@ -1010,13 +1155,41 @@ async def ws_term(ws: WebSocket, sid: str):
     cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
     client_id = (cid, id(ws))
     try:
-        await att.open()
+        info = await att.open()
     except Exception as e:
         log.info("attach failed sid=%s: %s", sid, e)
         await ws.close(code=4004, reason="no such session")
         return
 
     log.info("ws attach sid=%s", sid)
+    _ws_by_sid.setdefault(sid, set()).add(ws)
+
+    # Tell the browser the PTY's CURRENT size before any output. The backlog that follows was
+    # produced at this size, and replaying it into an xterm of another size is exactly the
+    # "reconnect and the screen is garbage" report. This frame is sent before `pump_out` starts,
+    # so it is guaranteed to arrive first.
+    sess = (info or {}).get("session") or {}
+    cur = _applied_size.get(sid)
+    if not cur and sess.get("cols") and sess.get("rows"):
+        cur = (int(sess["cols"]), int(sess["rows"]))
+        _applied_size[sid] = cur          # the daemon's size IS the applied size after a server restart
+    if cur:
+        await _push_size(sid, cur[0], cur[1], only=ws)
+
+    # A RE-attach replays whatever the ring buffer holds, which starts mid-stream and, for a
+    # TUI, is a diff against a screen this browser never had. Give the app a moment to finish
+    # replaying, then force a full repaint (see `_kick`). A session younger than a few seconds
+    # is a fresh shell whose backlog is complete, so it needs none.
+    try:
+        age = time.time() - float(sess.get("created") or 0)
+    except (TypeError, ValueError):
+        age = 0
+    kick_task = None
+    if age > 5:
+        async def _late_kick():
+            await asyncio.sleep(1.2)
+            await _kick(sid, att, "reattach")
+        kick_task = asyncio.create_task(_late_kick())
 
     async def pump_out():
         """daemon -> browser"""
@@ -1042,9 +1215,16 @@ async def ws_term(ws: WebSocket, sid: str):
                 _client_sizes.setdefault(sid, {})[client_id] = size
                 _last_report[sid] = size          # the most recent reporter owns the size
                 # force=true means "fit to my screen" - keep this size even when others report
-                await _sync_size(sid, att,
-                                 force=size if msg.get("force") else None,
-                                 owner=cid)
+                target = await _sync_size(sid, att,
+                                          force=size if msg.get("force") else None,
+                                          owner=cid)
+                # The request changed nothing (already that size, or another client's pin won).
+                # The reporter is waiting for an answer to apply, so answer it with the size that
+                # actually holds. Silence here would leave it measuring and re-reporting forever.
+                if target and _applied_size.get(sid) == target:
+                    await _push_size(sid, target[0], target[1], only=ws)
+            elif t == "kick":                 # the refresh button: repaint without a size change
+                await _kick(sid, att, "refresh")
             elif t == "unforce":
                 _forced_size.pop(sid, None)
                 _forced_by.pop(sid, None)
@@ -1058,6 +1238,11 @@ async def ws_term(ws: WebSocket, sid: str):
         log.info("ws error sid=%s: %s", sid, e)
     finally:
         out_task.cancel()
+        if kick_task:
+            kick_task.cancel()
+        (_ws_by_sid.get(sid) or set()).discard(ws)
+        if not _ws_by_sid.get(sid):
+            _ws_by_sid.pop(sid, None)
         # This client left, so recompute the size (when the phone leaves, revert to PC size).
         # Apply only if clients remain - if nobody's left, don't touch the PTY size.
         (_client_sizes.get(sid) or {}).pop(client_id, None)

@@ -17,6 +17,9 @@ static/vendor-*/
 # -- User settings (defaults live in config.default.json; user values aren't committed) --
 config.json
 
+# -- Per-install state: which commit the files came from (written by install.ps1 / update.ps1) --
+.installed-commit
+
 # -- Docs and screenshots are not published --
 # A screenshot once carried internal client info (IPs, domains, security structure) (2026-09-11).
 # Dev notes and the textbook aren't needed to run it and aren't fully reviewed, so they're untracked.

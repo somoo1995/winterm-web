@@ -46,6 +46,37 @@
   let fontSize = +(localStorage.getItem("webterm.font") || 14.7);
   // Baseline that font.reset returns to; config.json fontSize overrides it at boot.
   let baseFont = 14.7;
+  // The bundled stack. Naming a font does not mean it is used: JetBrains Mono ships inside
+  // WezTerm and is usually absent from the system, where this used to fall back to Consolas
+  // silently (measured cell width 8.084 = Consolas). The @font-face rules now try the
+  // INSTALLED font first (`local()`) and only then the bundled subset, so a machine that has
+  // the real fonts gets them whole - box drawing, every weight - with no late-loading race.
+  // Sarasa FIXED, not Mono: Mono draws ambiguous-width characters full width and they
+  // spill into the neighbouring cell.
+  // Emoji always fall back anyway, so name the system emoji font explicitly to keep it
+  // consistent (WezTerm uses Noto Color Emoji; the browser gets Windows' Segoe UI Emoji).
+  // Order is the division of labour - a missing glyph falls through to the next font:
+  //   latin and symbols -> JetBrains Mono (the font WezTerm uses)
+  //   CJK and ambiguous -> Sarasa Fixed K (exact width, ambiguous drawn half width)
+  //   emoji             -> Segoe UI Emoji
+  // The resulting width ratio matches WezTerm: cell / CJK / double = 83% either way.
+  const FONT_STACK = '"JetBrains Mono","Sarasa Fixed K","Segoe UI Emoji","Consolas",ui-monospace,monospace';
+  // A font the user chose (config.json `fontFamily`, "" = none). It goes IN FRONT of the stack,
+  // never instead of it: a glyph the chosen font lacks (Korean in a latin-only font, box
+  // drawing) still falls through to the bundled ones. That is also why a name that is not
+  // installed is harmless - the browser skips it and the stack draws as before.
+  let fontFamily = "";
+  const termFontFamily = () => (fontFamily ? `"${fontFamily.replace(/"/g, "")}",` : "") + FONT_STACK;
+  // Windows build for xterm's `windowsPty`, from /api/config (0 elsewhere). xterm uses it to
+  // decide whether to reflow its own buffer on resize; `?reflow=0` pretends an old ConPTY so
+  // reflow is off and the wrapping heuristics are on - an A/B switch for resize corruption
+  // reports, since ConPTY itself reflows too and two reflows of one screen can disagree.
+  let osBuild = 0;
+  const windowsPtyOpts = () => {
+    const m = /[?&]reflow=([01])/.exec(location.search);
+    const build = m ? (m[1] === "0" ? 10000 : 26100) : osBuild;
+    return build ? { backend: "conpty", buildNumber: build } : { backend: "conpty" };
+  };
 
   // Which modifier the APP owns. On macOS that is Cmd, so Ctrl reaches the shell intact -
   // Ctrl+C, Ctrl+R, Ctrl+P and friends belong to readline, and a terminal that eats them is a
@@ -92,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 119;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 125;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -130,6 +161,9 @@
   document.addEventListener("compositionend", () => {
     composing = false;
     imeProbe("end");
+    // A size the server pushed mid-composition was parked (`applySize`) - apply it now, before
+    // anything else, or the cell count stays wrong for as long as nothing else triggers it.
+    panes.forEach((p) => { if (p.pendingSize) applySize(p, p.pendingSize[0], p.pendingSize[1]); });
     // flush any resize deferred during composition, else the size stays wrong
     if (typeof scheduleResize === "function") scheduleResize();
   }, true);
@@ -318,7 +352,15 @@
   };
 
   // ---------- derived ----------
-  const tabNames = () => [...new Set(sessions.map(s => s.name))];
+  // Hidden panes are parked under a reserved tab name instead of a server-side flag: a tab is
+  // only "the sessions sharing a name", so parking one is the same rename the move command uses
+  // and the daemon keeps the PTY running exactly as before. ":" is forbidden in a tab name
+  // (server.py's _bad_tab_name), so a user can never create or collide with this one.
+  // Filtering it out of tabNames() is enough to remove it everywhere - the tab bar, the rail, the
+  // move picker and the pane grid all derive from this one function.
+  const HIDDEN_TAB = ":hidden";
+  const tabNames = () => [...new Set(sessions.map(s => s.name))].filter(n => n !== HIDDEN_TAB);
+  const hiddenPanes = () => sessions.filter(s => s.name === HIDDEN_TAB);
   const tabPanes = (name) => sessions.filter(s => s.name === name);
   const sessOf = (sid) => sessions.find(s => s.sid === sid);
 
@@ -483,9 +525,12 @@
     const busy = sessions.filter(s => spinState(s.title) === "busy").length;
     const head = document.createElement("div");
     head.className = "rl-head";
+    const hid = hiddenPanes().length;
     head.innerHTML = `${sessions.length} sessions` +
                      (wait ? ` · <span class="wait">${wait} waiting</span>` : "") +
-                     (busy ? ` · ${busy} busy` : "");
+                     (busy ? ` · ${busy} busy` : "") +
+                     // A pane nobody can see is a pane nobody remembers - keep a count on screen.
+                     (hid ? ` · <span class="hid">${hid} hidden</span>` : "");
     box.appendChild(head);
 
     tabNames().forEach((name, ti) => {
@@ -852,19 +897,7 @@
 
     const term = new Terminal({
       theme: THEME,
-      // Naming a font does not mean it is used: JetBrains Mono ships inside WezTerm and is
-      // usually absent from the system, where this used to fall back to Consolas silently
-      // (measured cell width 8.084 = Consolas).
-      // Sarasa FIXED, not Mono: Mono draws ambiguous-width characters full width and they
-      // spill into the neighbouring cell.
-      // Emoji always fall back anyway, so name the system emoji font explicitly to keep it
-      // consistent (WezTerm uses Noto Color Emoji; the browser gets Windows' Segoe UI Emoji).
-      // Order is the division of labour - a missing glyph falls through to the next font:
-      //   latin and symbols -> JetBrains Mono (the font WezTerm uses)
-      //   CJK and ambiguous -> Sarasa Fixed K (exact width, ambiguous drawn half width)
-      //   emoji             -> Segoe UI Emoji
-      // The resulting width ratio matches WezTerm: cell / CJK / double = 83% either way.
-      fontFamily: '"JetBrains Mono","Sarasa Fixed K","Segoe UI Emoji","Consolas",ui-monospace,monospace',
+      fontFamily: termFontFamily(),          // see FONT_STACK / fontFamily at the top
       fontSize,
       // 500 (Medium) matches .wezterm.lua's weight="Medium". JetBrains Mono really ships a
       // 500 file, so nothing is synthesized; Sarasa only has 300/400/700, and asking it for
@@ -884,11 +917,25 @@
       // Only effective on the canvas/WebGL renderer - the DOM renderer draws with the font -
       // which is why whether WebGL actually attached matters (see attachWebgl below).
       customGlyphs: true,
-      windowsPty: { backend: "conpty" },
+      windowsPty: windowsPtyOpts(),
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    // Character WIDTH table. xterm's built-in table is Unicode 6 (2010): newer symbols and
+    // emoji are 1 cell there, while ConPTY (Windows 11) counts them with a current table,
+    // often 2. Any disagreement corrupts the screen, and not just that one glyph: ConPTY sends
+    // DIFFS against its own model of the screen and skips over cells it believes are already
+    // right, so one width error shifts a row and the stale cells never get overwritten.
+    // Screenshot 2026-09-23: old letters left exactly in the SPACES of a Korean line - ConPTY
+    // jumped the cursor over them. Windows Terminal shares ConPTY's table, so it never drifts.
+    // Unicode 11 is the newest table xterm ships; `?uni=6` restores the old one for comparison.
+    if (window.Unicode11Addon && !/[?&]uni=6/.test(location.search)) {
+      try {
+        term.loadAddon(new Unicode11Addon.Unicode11Addon());
+        term.unicode.activeVersion = "11";
+      } catch (e) { console.warn("unicode11 addon failed", e); }
+    }
     term.open(host);
     // WebGL renderer - draws the canvas at dpr resolution, so it is sharper on scaled
     // displays. The default DOM renderer positions glyphs in CSS px, so at a fractional
@@ -940,6 +987,7 @@
         ['500 ' + fontSize + 'px "JetBrains Mono"', 'M─│┌┐└┘├┤┬┴┼'],
         ['400 ' + fontSize + 'px "Sarasa Fixed K"', '가─│①←'],
       ];
+      if (fontFamily) need.unshift(['400 ' + fontSize + 'px "' + fontFamily + '"', 'M가─│']);
       const warm = Promise.all(need.map(([f, t]) => {
         try { return document.fonts.load(f, t).catch(() => null); } catch (_) { return null; }
       }));
@@ -1078,6 +1126,9 @@
     // turns off or the app is switched (that is the detach/attach churn in the log), and
     // losing ownership each time would snap the size back to the PC's.
     const ws = new WebSocket(`${proto}://${location.host}/ws/${p.sid}?cid=${encodeURIComponent(CID)}`);
+    // Text frames are terminal output, verbatim. Control messages from the server (the PTY
+    // size) come as BINARY frames so they can never be confused with something a shell printed.
+    ws.binaryType = "arraybuffer";
     p.ws = ws;
     ws.onopen = () => {
       p.attachedAt = performance.now();
@@ -1096,6 +1147,12 @@
       if (p.sid === activeSid) focusTerm(p.term);   // no focus in read mode
     };
     ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {       // control frame (see server `_size_frame`)
+        let m = null;
+        try { m = JSON.parse(new TextDecoder().decode(ev.data)); } catch (_) { return; }
+        if (m && m.t === "size" && m.c > 0 && m.r > 0) applySize(p, m.c, m.r);
+        return;
+      }
       if (ev.data === "") {                       // ping echo = latency measurement
         const ms = performance.now() - pingAt, lag = $("#lag");
         if (performance.now() < lagHold) return;  // `flash()` is borrowing the same slot
@@ -1307,6 +1364,27 @@
     return !!(g && g.classList.contains("off"));
   };
 
+  // The ONE place xterm's cell count changes. The size always comes from the server (the
+  // `size` control frame, or the session poll as a fallback) - never from our own measurement.
+  //
+  // It used to be `fit()`: measure my box and resize xterm right away, then tell the server.
+  // The PTY caught up a few hundred ms later, and everything the app printed in between was
+  // laid out for the OLD width while xterm placed it at the NEW one. For a full-screen TUI
+  // (claude) that is not a glitch that scrolls away - cursor-relative redraws keep landing in
+  // the wrong cells until the next complete repaint. Windows Terminal never has this window
+  // because it resizes its buffer and ConPTY under one lock; the closest a web client can get
+  // is to change nothing locally until the server says the PTY has that size.
+  function applySize(p, c, r) {
+    if (!p || !c || !r) return;
+    // Mid IME composition xterm must not be touched: a resize repositions the textarea and
+    // the syllable being composed is dropped, leaking loose jamo. Park it; `compositionend`
+    // applies it.
+    if (composing) { p.pendingSize = [c, r]; return; }
+    p.pendingSize = null;
+    if (p.term.cols === c && p.term.rows === r) return;
+    try { p.term.resize(c, r); } catch (_) {}
+  }
+
   function resizePane(p) {
     if (!p || isOff(p)) return;
     // Never resize mid IME composition: a resize makes the shell redraw and xterm
@@ -1317,7 +1395,11 @@
       // covered and the prompt invisible. The phone block now shrinks the body height when
       // the keyboard opens, so the fit result IS the visible area and demanding that size
       // is correct.
-      p.fit.fit();                                            // settle our own cell count
+      // MEASURE only - `proposeDimensions` does not touch xterm. The resize itself happens in
+      // `applySize` when the server answers (see there for why).
+      const d = p.fit.proposeDimensions();
+      if (!d || !(d.cols > 1) || !(d.rows > 1)) return;      // not laid out yet (hidden pane)
+      const c = d.cols, r = d.rows;
       // Skip the report based on the PTY's ACTUAL size, never on "what I sent last time".
       // Comparing against `p.reported` deadlocked: fit says 78, reported is 78 so the
       // report is skipped, the PTY stays at 69, polling sees the mismatch and calls
@@ -1325,20 +1407,20 @@
       // had 69, so claude's separators stopped short of the right edge.
       // The only reason to skip is that the PTY already matches our size.
       const cur = sessOf(p.sid);
-      if (cur && cur.cols === p.term.cols && cur.rows === p.term.rows) return;
+      if (cur && cur.cols === c && cur.rows === r && p.term.cols === c && p.term.rows === r) return;
       // just sent the same value? it may not be applied yet - wait briefly to avoid dupes
-      if (p.reported && p.reported[0] === p.term.cols && p.reported[1] === p.term.rows
+      if (p.reported && p.reported[0] === c && p.reported[1] === r
           && performance.now() - p.reportedAt < 1500) return;
       // Ignore small jitter while typing. A resize makes the shell redraw everything, and
       // mid-typing that overprints the completion list and input box. Opening the keyboard
       // or the dock is a big change (9+ rows) and passes through; the +/-4 rows an address
       // bar produces while sliding are dropped, but only while typing.
-      if (typing && p.reported && p.reported[0] === p.term.cols
-          && Math.abs(p.reported[1] - p.term.rows) <= 5) return;
+      if (typing && p.reported && p.reported[0] === c
+          && Math.abs(p.reported[1] - r) <= 5) return;
       // While `forced`, carry force on EVERY report; otherwise the server holds the old
       // forced value and ignores new ones, leaving a foldable stuck at its folded size.
-      wsend(p, { t: "r", c: p.term.cols, r: p.term.rows, force: forced || undefined });
-      p.reported = [p.term.cols, p.term.rows];   // so polling does not revert us to the old PTY size
+      wsend(p, { t: "r", c: c, r: r, force: forced || undefined });
+      p.reported = [c, r];                       // so polling does not revert us to the old PTY size
       p.reportedAt = performance.now();
     } else {
       // Follower mode always syncs, keyboard or not: all it does is apply the PTY size to
@@ -1346,9 +1428,7 @@
       // not follow a PTY resize, scattering glyphs (the cell-count mismatch this file opens
       // with).
       const s = sessOf(p.sid);                                // follower: take the PTY size as is
-      if (s && s.cols && s.rows && (p.term.cols !== s.cols || p.term.rows !== s.rows)) {
-        p.term.resize(s.cols, s.rows);
-      }
+      if (s && s.cols && s.rows) applySize(p, s.cols, s.rows);
     }
   }
   const resizeAll = () => panes.forEach(resizePane);
@@ -1550,6 +1630,80 @@
     await refresh(true);                        // the label only shows after a list refresh
   }
 
+  // Ctrl+M - move this pane into another tab.
+  //
+  // A tab is not an object: it is every session that shares a `name` (see the server's data
+  // model), so "moving" a pane is just renaming one session. The daemon keeps holding the PTY,
+  // so the screen, the scrollback and the running process all survive untouched.
+  async function movePane(sid) {
+    const s = sessOf(sid);
+    if (!s) return;
+    const n = tabPanes(s.name).findIndex((p) => p.sid === sid) + 1;
+    const targets = tabNames().filter((t) => t !== s.name);
+    // Moving into the tab it is already in is a no-op, and with one tab there is nowhere to go.
+    if (!targets.length) { flash(tr("msg.moveAlone")); return; }
+    const to = await pick(
+      tr("msg.movePane", { n: n }),
+      targets.map((t) => ({ value: t, label: t, sub: tr("msg.movePaneCount", { n: tabPanes(t).length }) })),
+      tr("msg.moveHint"));
+    if (to === null) return;
+
+    // (tab name, pane label) is a composite key, and unlike `label` the rename endpoint does NOT
+    // check it (server.py's api_rename sets the name and nothing else). Carrying a manual label
+    // into a tab that already has one would therefore make `tab:label` ambiguous and every
+    // name-based lookup - the API, the skill - would answer 409 instead of finding the pane.
+    // Drop the label in that case: an automatic name is a smaller loss than an unaddressable pane.
+    const mine = paneLabel(sid).trim();
+    const clash = !!mine && tabPanes(to).some((p) => paneLabel(p.sid).trim() === mine);
+    if (clash) await api.label(sid, "");
+
+    const r = await api.rename(sid, to);
+    if (r && r.ok === false) { alert(tr("msg.moveFailed")); return; }
+    activeTab = to;                 // follow the pane, otherwise it vanishes from view
+    activeSid = sid;
+    await refresh(true);
+    flash(tr(clash ? "msg.moveLabelCleared" : "msg.moved", { name: to }));
+  }
+
+  // Ctrl+H - one picker for both directions: park this pane out of sight, or bring a parked one
+  // into the tab being looked at right now. Coming back to WHERE IT WAS is deliberately not
+  // offered: the original tab may be gone by then, and "bring it here" is the thing actually
+  // wanted after walking away from it.
+  async function hidePane(sid) {
+    const s = sessOf(sid);
+    const hidden = hiddenPanes();
+    const items = [];
+    // Hiding the last visible pane would leave an empty screen with no tab to restore into.
+    const canHide = !!s && tabNames().length > 0 && sessions.length - hidden.length > 1;
+    if (canHide) items.push({ value: { op: "hide" }, label: tr("msg.hideThis"), sub: paneLabel(sid) || (s.title || "") });
+    for (const h of hidden) {
+      items.push({ value: { op: "show", sid: h.sid },
+                   label: paneLabel(h.sid) || h.title || h.sid.slice(0, 8),
+                   sub: tr("msg.hideHidden") });
+    }
+    if (!items.length) { flash(tr(s && !canHide ? "msg.hideLast" : "msg.hideNothing")); return; }
+
+    const r = await pick(tr("msg.hideTitle"), items, tr("msg.moveHint"));
+    if (r === null) return;
+
+    if (r.op === "hide") {
+      await api.rename(sid, HIDDEN_TAB);
+      await refresh(true);
+      flash(tr("msg.hideDone", { n: hidden.length + 1 }));
+      return;
+    }
+    // Bringing one back is a move into the current tab, so it carries the same composite-key
+    // risk as movePane - see the comment there.
+    const to = activeTab;
+    if (!to) { flash(tr("msg.hideNothing")); return; }
+    const mine = paneLabel(r.sid).trim();
+    if (mine && tabPanes(to).some((p) => paneLabel(p.sid).trim() === mine)) await api.label(r.sid, "");
+    await api.rename(r.sid, to);
+    activeSid = r.sid;
+    await refresh(true);
+    flash(tr("msg.hideBack", { name: to }));
+  }
+
   async function renameTab(name) {
     const v = await ask(tr("msg.tabName"), name);
     if (v === null) return;
@@ -1609,8 +1763,9 @@
       // server picked a different value). Follow it even while pinned: "xterm cells == PTY
       // cells" is the absolute rule at the top of this file, and breaking it misplaces
       // glyphs. The 3s grace above already filtered out "not applied yet", so this is a
-      // real mismatch.
-      p.term.resize(s.cols, s.rows);
+      // real mismatch. (Normally the server's `size` frame has already done this; the poll
+      // is the safety net for a frame lost to a reconnect.)
+      applySize(p, s.cols, s.rows);
     }
 
     // Never put cols/rows into `sig`. Doing so created a feedback loop:
@@ -1717,13 +1872,14 @@
     remeasureCells();                      // also rescues panes baked with fallback glyphs
     forced = true;                         // my screen is the reference now, rotation and folds included
     localStorage.setItem("webterm.fit", "1");
-    try { p.fit.fit(); } catch (e) {}      // settle the cell count for the current screen
-    const c = p.term.cols, r = p.term.rows;
+    // Measure only; xterm takes the size when the server confirms it (`applySize`).
+    let c = p.term.cols, r = p.term.rows;
+    try { const d = p.fit.proposeDimensions(); if (d && d.cols > 1 && d.rows > 1) { c = d.cols; r = d.rows; } } catch (e) {}
     wsend(p, { t: "r", c: c, r: r, force: true });                                  // pin that size
-    // If the cell count is unchanged the PTY ignores the resize and the TUI never redraws,
-    // so shrink by one column and restore it to manufacture a change.
-    setTimeout(() => wsend(p, { t: "r", c: Math.max(2, c - 1), r: r, force: true }), 60);
-    setTimeout(() => wsend(p, { t: "r", c: c, r: r, force: true }), 200);
+    // If the cell count is unchanged the PTY ignores the resize and the TUI never redraws.
+    // `kick` makes the server shrink the PTY by one column and restore it (daemon-side only,
+    // so no browser reflows) - the one thing that makes ConPTY repaint the whole screen.
+    setTimeout(() => wsend(p, { t: "kick" }), 120);
     // Refresh is the button you press when the screen looks wrong, so do more than
     // renegotiate the size: also check renderer, socket and viewport, and repaint
     // everything (see `healPanes`).
@@ -1758,6 +1914,70 @@
         if (e.key === "Enter") done(input.value);
         if (e.key === "Escape") done(null);
       };
+      wrap.onmousedown = (e) => { if (e.target === wrap) done(null); };
+    });
+  }
+
+  // ---------- inline picker ----------
+  // The list flavour of ask(): show `items` and resolve with the chosen `value` (null on cancel).
+  //
+  // It deliberately reuses the id "ask". modalOpen() tests for that id to decide that a modal owns
+  // the keyboard, so a different id would let Ctrl+M fire again and stack a second picker on top.
+  // Focus moves onto the wrapper for the same reason ask() focuses its input: while xterm's
+  // textarea keeps focus, every keystroke goes to the terminal instead.
+  function pick(labelText, items, hintText) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement("div");
+      wrap.id = "ask";
+      wrap.className = "pick";
+      wrap.tabIndex = -1;
+      wrap.innerHTML = `<div class="box"><label></label><div class="list"></div>
+        <div class="hint"></div></div>`;
+      wrap.querySelector("label").textContent = labelText;
+      wrap.querySelector(".hint").textContent = hintText || "";
+      const list = wrap.querySelector(".list");
+      let cur = 0;
+
+      const done = (v) => {
+        removeEventListener("keydown", onKey, true);
+        wrap.remove();
+        focusPane(activeSid);
+        resolve(v);
+      };
+      const rows = items.map((it, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "row";
+        const k = document.createElement("span"); k.className = "k";
+        k.textContent = i < 9 ? String(i + 1) : "";     // only 1-9 get a shortcut digit
+        const t = document.createElement("span"); t.className = "t"; t.textContent = it.label;
+        const sub = document.createElement("span"); sub.className = "s"; sub.textContent = it.sub || "";
+        b.append(k, t, sub);
+        b.onclick = () => done(it.value);
+        b.onmousemove = () => { if (cur !== i) { cur = i; paint(); } };
+        list.appendChild(b);
+        return b;
+      });
+      const paint = () => rows.forEach((b, i) => b.classList.toggle("on", i === cur));
+      paint();
+
+      // Keys this modal does not handle are left alone rather than swallowed; focus already
+      // keeps them away from the terminal.
+      const onKey = (e) => {
+        const d = /^[1-9]$/.test(e.key) ? +e.key : 0;
+        if (!(d || ["Escape", "Enter", "ArrowDown", "ArrowUp"].includes(e.key))) return;
+        e.stopPropagation();
+        e.preventDefault();
+        if (e.key === "Escape") return done(null);
+        if (e.key === "Enter") return done(items[cur] ? items[cur].value : null);
+        if (e.key === "ArrowDown") { cur = (cur + 1) % items.length; return paint(); }
+        if (e.key === "ArrowUp") { cur = (cur - 1 + items.length) % items.length; return paint(); }
+        if (items[d - 1]) return done(items[d - 1].value);
+      };
+
+      document.body.appendChild(wrap);   // append first: modalOpen() has to see it
+      wrap.focus();
+      addEventListener("keydown", onKey, true);
       wrap.onmousedown = (e) => { if (e.target === wrap) done(null); };
     });
   }
@@ -1799,6 +2019,8 @@
     "pane.next":    { desc: "next pane",             run: () => cyclePane(1) },
     "pane.close":   { desc: "close pane",             run: () => { if (activeSid) closePane(activeSid); } },
     "pane.rename":  { desc: "pane name",             run: () => { if (activeSid) renamePane(activeSid); } },
+    "pane.move":    { desc: "move pane to another tab", run: () => { if (activeSid) movePane(activeSid); } },
+    "pane.hide":    { desc: "hide a pane / bring one back", run: () => hidePane(activeSid) },
 
     "tab.new":      { desc: "new tab",                 run: () => newTab(DEFAULT_CWD) },
     "tab.rename":   { desc: "tab name",               run: () => { if (activeTab) renameTab(activeTab); } },
@@ -1948,6 +2170,8 @@
         baseFont = +cfg.fontSize;
         fontSize = baseFont;
       }
+      fontFamily = cfg.fontFamily || "";       // panes are created after this, so no re-apply needed
+      osBuild = +cfg.osBuild || 0;
     }
     const km = (cfg && cfg.keymap && Object.keys(cfg.keymap).length) ? cfg.keymap : FALLBACK_KEYMAP;
     setKeymap(withMacDefaults(km, (cfg && cfg.defaults) || FALLBACK_KEYMAP));
@@ -1976,15 +2200,43 @@
       document.body.classList.remove("has-stale");
       return;
     }
-    $("#stale-text").textContent = `${worst.text} (${worst.cost})`;
     const act = $("#stale-act");
-    act.textContent = tr(worst.action === "reload" ? "stale.reload" : "stale.how");
-    act.onclick = () => {
+    if (worst.action === "update") {
+      $("#stale-text").textContent = tr("stale.update", { remote: worst.remote || "?", local: worst.local || "?" });
+      act.textContent = tr("stale.updateBtn");
+    } else {
+      $("#stale-text").textContent = `${worst.text} (${worst.cost})`;
+      act.textContent = tr(worst.action === "reload" ? "stale.reload"
+                         : worst.action === "restart-server" ? "stale.restart" : "stale.how");
+    }
+    act.disabled = false;
+    act.onclick = async () => {
       if (worst.action === "reload") return location.reload();
-      // There is no button that can restart a process the page does not own, and pretending
-      // otherwise would be worse than saying so plainly.
-      alert(tr(worst.action === "restart-server"
-                ? "stale.serverHelp" : "stale.daemonHelp"));
+      // The daemon restart closes every shell, so it never runs without a dialog that says
+      // how many sessions are alive - the decision stays with the user, but the typing does not.
+      if (worst.action === "restart-daemon" && !(await confirmDaemonRestart())) return;
+      act.disabled = true;
+      const path = worst.action === "update" ? "/api/update"
+                 : worst.action === "restart-daemon" ? "/api/restart-daemon" : "/api/restart-server";
+      let r = null;
+      try { r = await postAction(path); } catch (_) {}
+      if (!r || !r.ok) {
+        act.disabled = false;
+        alert((r && r.error) || tr("stale.failed"));
+        if (worst.action !== "update") alert(tr("stale.serverHelp"));
+        return;
+      }
+      $("#stale-text").textContent = tr(worst.action === "update" ? "stale.updating" : "stale.restarting");
+      // The update takes ~10-30s (download, copy, pip) and the restart ~2s; in both cases the
+      // next check sees a different answer - files ahead of the server, or nothing at all - so
+      // keep asking until it changes rather than guessing a delay.
+      let tries = 0;
+      const again = async () => {
+        if (++tries > 40) { act.disabled = false; return; }
+        await checkStale();
+        if (!$("#stale").hidden && $("#stale-act").disabled) setTimeout(again, 2000);
+      };
+      setTimeout(again, worst.action === "update" ? 5000 : 2500);
     };
     $("#stale-x").onclick = () => {
       staleDismissed = worst.what;
@@ -1995,10 +2247,78 @@
     document.body.classList.add("has-stale");
   }
 
+  // POST for the three maintenance actions. The daemon one carries the confirmation token the
+  // server insists on, so no stray request can end every shell.
+  function postAction(path) {
+    const body = path === "/api/restart-daemon" ? JSON.stringify({ confirm: "close-all-shells" }) : null;
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body })
+      .then((x) => x.json());
+  }
+  async function confirmDaemonRestart() {
+    let n = sessions.length;
+    try { n = ((await api.list()).sessions || []).length; } catch (_) {}
+    return confirm(tr("stale.daemonConfirm", { n }));
+  }
+
   checkStale();
   // On focus rather than on a timer: an update happens while you are away in a terminal or an
   // editor, so coming back to the tab is exactly the moment the answer may have changed.
   addEventListener("focus", checkStale);
+
+  // ---------- settings > version / update ----------
+  // The banner's facts, on demand. While working you dismiss the banner; this is where you
+  // come back to it, and where "check now" lives (the background check is hours apart).
+  async function stLoadUpdate(checkNow) {
+    const box = $("#st-upd-text");
+    const btn = { check: $("#st-upd-check"), go: $("#st-upd-go"),
+                  server: $("#st-upd-server"), daemon: $("#st-upd-daemon") };
+    btn.check.disabled = true;
+    if (checkNow) box.textContent = tr("st.upd.checking");
+    let r = null;
+    try {
+      if (checkNow) await fetch("/api/update/check", { method: "POST" });
+      r = await fetch(`/api/version?ver=${APP_VER}`).then((x) => x.json());
+    } catch (_) {}
+    btn.check.disabled = false;
+    if (!r || !r.ok) { box.textContent = tr("st.loadFailed"); return; }
+    const u = r.update || {};
+    // Plain version numbers (release dates), never hashes: "you have X, the latest is Y".
+    const v = { local: u.local || "?", remote: u.remote || "?",
+                when: u.checked ? new Date(u.checked * 1000).toLocaleString() : "-" };
+    let text;
+    if (u.available)       text = tr("st.upd.available", v);
+    else if (u.remote)     text = tr("st.upd.upToDate", v);
+    else                   text = tr("st.upd.unknown", Object.assign({ err: u.error || "-" }, v));
+    if (u.dev)             text += tr("st.upd.dev");
+    // Something on disk that is not running yet (an update that landed, a pull): say which.
+    const stale = (r.stale || []).filter((s) => s.what !== "update");
+    if (stale.length) text += tr("st.upd.stale", { what: stale.map((s) => s.what).join(", ") });
+    box.textContent = text;
+    box.classList.toggle("warn", !!(u.available || stale.length));
+    btn.go.hidden = !(u.available && !u.dev);
+    btn.server.hidden = !stale.some((s) => s.what === "server") && !stale.some((s) => s.what === "browser");
+    btn.daemon.hidden = !stale.some((s) => s.what === "daemon");
+    // A browser that is behind only needs a reload; reuse the server button's slot for that.
+    if (stale.some((s) => s.what === "browser") && !stale.some((s) => s.what === "server")) {
+      btn.server.textContent = tr("stale.reload");
+      btn.server.onclick = () => location.reload();
+    } else {
+      btn.server.textContent = tr("st.upd.server");
+      btn.server.onclick = () => stAction("/api/restart-server");
+    }
+  }
+  async function stAction(path) {
+    if (path === "/api/restart-daemon" && !(await confirmDaemonRestart())) return;
+    let r = null;
+    try { r = await postAction(path); } catch (_) {}
+    if (!r || !r.ok) { stMsg((r && r.error) || tr("stale.failed"), "err"); return; }
+    stMsg(tr("st.upd.started"), "ok");
+    setTimeout(checkStale, path === "/api/update" ? 5000 : 2500);
+    setTimeout(() => stLoadUpdate(false), path === "/api/update" ? 6000 : 3500);
+  }
+  $("#st-upd-check").onclick = () => stLoadUpdate(true);
+  $("#st-upd-go").onclick = () => stAction("/api/update");
+  $("#st-upd-daemon").onclick = () => stAction("/api/restart-daemon");
 
   // ---------- settings panel ----------
   // Settings are saved on the SERVER (config.json), not in this browser, so a shortcut rebound
@@ -2034,6 +2354,7 @@
       return { chord, id: p.id, arg: p.arg };
     });
     $("#st-font").value = fontSize;
+    $("#st-family").value = (cfg && cfg.fontFamily) || "";
     $("#st-cwd").value = (cfg && cfg.defaultCwd) || "";
     stLoadShells(cfg);
 
@@ -2180,6 +2501,7 @@
       stLoad(cfg && cfg.ok ? cfg : null);
       stRender();
       stMsg("");
+      stLoadUpdate(false);           // cached answer; "Check now" asks GitHub
       $("#settings").hidden = false;
       // Without this the terminal keeps focus and typing goes into the shell behind the panel.
       // Skipped on phones, where focusing a text field pops the soft keyboard over the list.
@@ -2220,6 +2542,45 @@
       // A font size set in THIS browser still wins, same rule as on first load.
       if (localStorage.getItem("webterm.font") === null) setFont(baseFont);
     }
+    // The font is a server setting with no per-browser override (the SIZE has one because
+    // screens differ; a font name is a preference). `undefined` = the field was not in the
+    // reply, "" = reset to the built-in stack.
+    if (cfg.fontFamily !== undefined) setFontFamily(cfg.fontFamily || "");
+  }
+
+  // Which font a name really draws with. `document.fonts.check` is useless here - it answers
+  // "does this need loading", which is always false for a local font, present or not (the
+  // same trap the diag block below documents). Measuring is the only honest test:
+  //   - a name the device lacks measures exactly like the generic fallback, and
+  //   - a proportional font gives "M" and "i" different widths.
+  // Both are warnings, not errors: the stack behind the name keeps the terminal readable.
+  function checkFont(name) {
+    if (!name) return "ok";
+    try {
+      const cv = document.createElement("canvas").getContext("2d");
+      const w = (font, ch) => { cv.font = `${fontSize}px ${font}`; return cv.measureText(ch).width; };
+      const q = `"${name.replace(/"/g, "")}"`;
+      // Compare against two different generic fallbacks: a name that is absent inherits the
+      // fallback's width in BOTH cases, a present one keeps its own width regardless.
+      const same = (a, b) => Math.abs(a - b) < 0.01;
+      const absent = same(w(`${q}, monospace`, "M"), w("monospace", "M"))
+                  && same(w(`${q}, serif`, "M"), w("serif", "M"))
+                  && same(w(`${q}, sans-serif`, "M"), w("sans-serif", "M"));
+      if (absent) return "missing";
+      if (!same(w(q, "M"), w(q, "i"))) return "proportional";
+    } catch (_) {}
+    return "ok";
+  }
+
+  function setFontFamily(name) {
+    name = (name || "").trim();
+    if (name === fontFamily) return;
+    fontFamily = name;
+    const fam = termFontFamily();
+    panes.forEach((p) => { try { p.term.options.fontFamily = fam; } catch (_) {} });
+    // A new font means a new cell width: re-measure, re-bake the WebGL atlas, and re-report
+    // the size (the same box now holds a different number of columns).
+    remeasureCells();
   }
 
   async function stSave() {
@@ -2238,14 +2599,18 @@
     stMsg(tr("st.saving"));
     try {
       const body = { keymap, shell: stShellValue(), defaultCwd: $("#st-cwd").value,
-                     language: $("#st-lang").value };
+                     language: $("#st-lang").value, fontFamily: $("#st-family").value.trim() };
       const f = parseFloat($("#st-font").value);
       if (f) body.fontSize = f;
       const cfg = await stPost(body);
       stApply(cfg);
       stLoad(cfg);
       stRender();
-      stMsg(tr("st.saved"), "ok");
+      // Saved either way; but say so if the name will not actually draw on THIS device.
+      const fc = checkFont(cfg.fontFamily || "");
+      if (fc === "missing")           stMsg(tr("st.fontNotFound", { f: cfg.fontFamily }), "err");
+      else if (fc === "proportional") stMsg(tr("st.fontNotMono", { f: cfg.fontFamily }), "err");
+      else                            stMsg(tr("st.saved"), "ok");
     } catch (e) {
       stMsg(e.message, "err");
     }
@@ -2256,7 +2621,7 @@
     stMsg(tr("st.resetting"));
     try {
       // null removes the key, so config.default.json shows through again (see config.py).
-      const cfg = await stPost({ keymap: null, fontSize: null, shell: null,
+      const cfg = await stPost({ keymap: null, fontSize: null, fontFamily: null, shell: null,
                                  defaultCwd: null, language: null });
       stApply(cfg);
       stLoad(cfg);
@@ -2872,6 +3237,8 @@
           dpr: devicePixelRatio,
           zoom: Math.round(devicePixelRatio * 100) + "%",
           fontSize, lineHeight: 1.15,
+          fontFamily: fontFamily || null, fontCheck: checkFont(fontFamily), osBuild,
+          unicode: p && p.term.unicode ? p.term.unicode.activeVersion : null,
           has: { jetbrains: probe("JetBrains Mono"), consolas: probe("Consolas"),
                  cascadia: probe("Cascadia Mono"), malgun: probe("Malgun Gothic"),
                  d2coding: probe("D2Coding") },

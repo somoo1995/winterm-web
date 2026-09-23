@@ -146,7 +146,7 @@ def origin_allowed(origin):
 #
 # `security` is deliberately NOT writable here. That guard exists to survive a hostile page
 # reaching this server, and a guard a page can switch off is not a guard. It stays file-only.
-WRITABLE = ("keymap", "fontSize", "shell", "defaultCwd", "language")
+WRITABLE = ("keymap", "fontSize", "fontFamily", "shell", "defaultCwd", "language")
 
 # Kept in step with static/i18n.js. Two places, but the alternative is the server parsing JS.
 LANGUAGES = ("en", "ko")
@@ -207,6 +207,19 @@ def _validate(patch):
         if not 6 <= size <= 48:
             raise ConfigError("fontSize must be between 6 and 48")
         out["fontSize"] = size
+
+    if "fontFamily" in patch:
+        fam = patch["fontFamily"]
+        if not isinstance(fam, str):
+            raise ConfigError("fontFamily must be text")
+        fam = fam.strip().strip('"').strip("'").strip()
+        if len(fam) > 120:
+            raise ConfigError("fontFamily is too long (max 120)")
+        # It ends up inside a CSS font-family list, so keep it a plain name. Whether the font
+        # exists is the browser's question (it is per device), not this file's.
+        if any(ch in fam for ch in ';{}<>\\"\'\n\r'):
+            raise ConfigError("fontFamily: only the font's name, no quotes or punctuation")
+        out["fontFamily"] = fam
 
     if "language" in patch:
         lang = patch["language"]

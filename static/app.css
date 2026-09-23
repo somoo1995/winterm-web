@@ -162,6 +162,9 @@ body.rail #panes{margin-left:var(--rail-w)}
   border-bottom:1px solid var(--line); white-space:nowrap;
 }
 .rl-head .wait{color:var(--orange); font-weight:700}
+/* Hidden panes are invisible by definition, so the count is the only thing keeping them
+   findable - give it the same weight as the waiting count. */
+.rl-head .hid{color:var(--dim); font-weight:700}
 
 .rl-tab{
   padding:5px 8px 6px 9px; border-left:3px solid transparent; cursor:pointer;
@@ -319,6 +322,21 @@ body.rail #panes{margin-left:var(--rail-w)}
 }
 #ask .box input:focus{border-color:var(--tab-on-bg)}
 #ask .hint{margin-top:9px; font-size:10.5px; color:var(--dim)}
+
+/* ---- picker (Ctrl+M, move a pane) -------------------------------------------
+   The list flavour of #ask: it inherits the dimmed backdrop and the box, and only adds rows.
+   The id stays "ask" not just to share the style - modalOpen() tests for that id. */
+#ask.pick .list{display:flex; flex-direction:column; gap:2px; max-height:46vh; overflow-y:auto; margin-top:2px}
+#ask.pick .row{
+  display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+  padding:8px 11px; background:transparent; color:var(--fg);
+  border:1px solid transparent; border-radius:8px; font:inherit; cursor:pointer;
+}
+#ask.pick .row.on{background:var(--bg); border-color:var(--tab-on-bg)}
+#ask.pick .row .k{flex:none; width:18px; text-align:center; font-size:10.5px; color:var(--dim)}
+#ask.pick .row.on .k{color:var(--fg)}
+#ask.pick .row .t{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#ask.pick .row .s{flex:none; font-size:10.5px; color:var(--dim)}
 
 /* ===== phone only ===== */
 @media (max-width:640px){
@@ -672,6 +690,22 @@ body.phone #scrollpad button:active{ background:var(--tab-hover-bg) }
 .st-field input:focus{border-color:var(--tab-on-bg)}
 
 .st-note{margin-top:10px; font-size:10.5px; color:var(--dim); line-height:1.5}
+
+/* version / update block at the bottom of the General tab */
+.st-upd{margin-top:16px; padding-top:12px; border-top:1px solid var(--line)}
+.st-upd-head{font-size:12px; color:var(--dim); margin-bottom:6px}
+.st-upd-text{font-size:11.5px; line-height:1.6; white-space:pre-line; min-height:18px}
+.st-upd-text.warn{color:#ffb86c}
+.st-upd-btns{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px}
+.st-upd-btns button{
+  padding:7px 12px; background:var(--tab-off-bg); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; cursor:pointer;
+}
+.st-upd-btns button:hover{background:var(--tab-hover-bg)}
+.st-upd-btns button:disabled{opacity:.5; cursor:default}
+.st-upd-btns button.primary{background:var(--tab-on-bg); color:var(--tab-on-fg); border-color:transparent}
+.st-upd-btns button.danger{border-color:var(--red); color:var(--red)}
+.st-upd-btns button.danger:hover{background:var(--red); color:var(--bg)}
 .st-foot{
   display:flex; align-items:center; gap:10px;
   padding:11px 14px; border-top:1px solid var(--line);

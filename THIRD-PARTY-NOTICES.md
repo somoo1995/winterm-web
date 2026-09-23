@@ -6,7 +6,7 @@ authors; the notices below plus the bundled license texts satisfy those terms.
 
 | Component | Path | License | Copyright |
 | --- | --- | --- | --- |
-| xterm.js 5.5.x (+ addon-fit / addon-webgl / addon-web-links) | `static/vendor/` | MIT | Copyright (c) 2017-2022, The xterm.js authors<br>Copyright (c) 2014-2016, SourceLair Private Company<br>Copyright (c) 2012-2013, Christopher Jeffrey |
+| xterm.js 5.5.x (+ addon-fit / addon-webgl / addon-web-links / addon-unicode11 0.8.0) | `static/vendor/` | MIT | Copyright (c) 2017-2022, The xterm.js authors<br>Copyright (c) 2014-2016, SourceLair Private Company<br>Copyright (c) 2012-2013, Christopher Jeffrey |
 | JetBrains Mono (Latin subset, woff2) | `static/fonts/jbm/` | SIL Open Font License 1.1 | Copyright 2020 The JetBrains Mono Project Authors |
 | Sarasa Fixed K (CJK woff2) | `static/fonts/woff2/` | SIL Open Font License 1.1 | Copyright (c) 2018 Belleve Invis |
 

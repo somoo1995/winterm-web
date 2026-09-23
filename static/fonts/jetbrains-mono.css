@@ -16,7 +16,7 @@
   font-style: normal;
   font-weight: 500;
   font-display: block;
-  src: url("jbm/jetbrains-mono-latin-500-normal.woff2") format("woff2");
+  src: local("JetBrains Mono Medium"), local("JetBrainsMono-Medium"), url("jbm/jetbrains-mono-latin-500-normal.woff2") format("woff2");
 }
 
 @font-face {
@@ -24,7 +24,7 @@
   font-style: normal;
   font-weight: 700;
   font-display: block;
-  src: url("jbm/jetbrains-mono-latin-700-normal.woff2") format("woff2");
+  src: local("JetBrains Mono Bold"), local("JetBrainsMono-Bold"), url("jbm/jetbrains-mono-latin-700-normal.woff2") format("woff2");
 }
 
 @font-face {
@@ -32,7 +32,7 @@
   font-style: italic;
   font-weight: 500;
   font-display: block;
-  src: url("jbm/jetbrains-mono-latin-500-italic.woff2") format("woff2");
+  src: local("JetBrains Mono Medium Italic"), local("JetBrainsMono-MediumItalic"), url("jbm/jetbrains-mono-latin-500-italic.woff2") format("woff2");
 }
 
 @font-face {
@@ -40,5 +40,5 @@
   font-style: italic;
   font-weight: 700;
   font-display: block;
-  src: url("jbm/jetbrains-mono-latin-700-italic.woff2") format("woff2");
+  src: local("JetBrains Mono Bold Italic"), local("JetBrainsMono-BoldItalic"), url("jbm/jetbrains-mono-latin-700-italic.woff2") format("woff2");
 }

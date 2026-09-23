@@ -7,6 +7,7 @@
   "defaultCwd": "",
   "shell": "",
   "fontSize": 14.7,
+  "fontFamily": "",
   "security": {
     "_readme": [
       "Access control itself is delegated to the network (a private network / Tailscale). What this",
@@ -40,6 +41,8 @@
     "Ctrl+n": "tab.new",
     "Ctrl+t": "tab.rename",
     "Ctrl+p": "pane.rename",
+    "Ctrl+m": "pane.move",
+    "Ctrl+h": "pane.hide",
     "Ctrl+arrowleft": "tab.prev",
     "Ctrl+arrowright": "tab.next",
     "Ctrl+1": "tab.select:1",

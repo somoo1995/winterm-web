@@ -85,6 +85,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 Say "  done" "Green"
 
+# -- 2.5 Record which commit these files came from -----------------------------
+# updatecheck.py compares this with GitHub's `main` to show "a new version is available".
+# Best effort: offline installs simply get no marker and see the banner once, and the
+# in-app update writes it. A git checkout (developer machine) never needs it.
+if (-not (Test-Path (Join-Path $ROOT ".git"))) {
+    try {
+        $j = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/somoo1995/winterm-web/commits/main" `
+             -Headers @{ "User-Agent" = "webterm-install" } -TimeoutSec 10
+        Set-Content -Path (Join-Path $ROOT ".installed-commit") -Value $j.sha -Encoding ASCII -NoNewline
+        Say "  installed commit: $($j.sha.Substring(0, 8))" "DarkGray"
+    } catch {
+        Say "  (could not record the installed commit - the update check will simply offer an update)" "DarkGray"
+    }
+}
+
 # -- 3. Autostart --------------------------------------------------------------
 Step 3 "Autostart"
 $TASK = "WebtermServer"
