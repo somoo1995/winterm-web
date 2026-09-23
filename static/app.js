@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 129;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 130;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1153,7 +1153,12 @@
       p.userScrolled = false;
       p.delay = 500;
       $("#offline").hidden = true;
-      resizePane(p);
+      // No size report right here. The server's initial size frame sets the cell count, and
+      // this pane's own measurement waits for the debounced pass: measured on the spot, a
+      // freshly created pane's box is not laid out yet and every tab open reported 108
+      // columns and then 111 two hundred milliseconds later - two PTY resizes, two ConPTY
+      // repaints, and twice the chance of scrolling while the row counts differ.
+      scheduleResize();
       if (p.sid === activeSid) focusTerm(p.term);   // no focus in read mode
     };
     ws.onmessage = (ev) => {
@@ -1172,8 +1177,14 @@
           // a screen this browser never had. Ask for a full repaint now that the replay is
           // in (rows flap, no re-wrapping - see the server's `_kick`). A shell that was just
           // spawned has a complete backlog and needs none.
+          // Only when no resize is about to happen anyway: a size change already makes
+          // ConPTY repaint everything, and a kick on top of it is one more moment where the
+          // two row counts differ while output may scroll (the vertical drift of 14:38).
           const s = sessOf(p.sid);
-          if (s && s.created && Date.now() / 1000 - s.created > 5 && reportSize) wsend(p, { t: "kick" });
+          let d = null;
+          try { d = p.fit.proposeDimensions(); } catch (_) {}
+          const sameSize = !d || (d.cols === p.term.cols && d.rows === p.term.rows);
+          if (s && s.created && Date.now() / 1000 - s.created > 5 && reportSize && sameSize) wsend(p, { t: "kick" });
         }
         return;
       }
@@ -1430,6 +1441,10 @@
     clearTimeout(p.pendingT);
     // Through the write chain, so it lands after everything already queued for the parser.
     chain(p, () => new Promise((res) => { try { p.term.resize(ps[0], ps[1]); } catch (_) {} res(); }));
+    // No repaint marker was seen (idle shell, or the marker split across two chunks), so the
+    // screen may now be a diff against a model this terminal never showed. Ask for a full
+    // repaint; without it any drift would last until the next resize.
+    if (why === "timeout") wsend(p, { t: "kick" });
   }
   // All terminal output goes through one promise chain per pane. xterm's write() is queued
   // and parsed later, so a resize issued "between" two writes would otherwise run before
