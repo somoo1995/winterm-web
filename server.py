@@ -1016,17 +1016,21 @@ _last_report = {}           # {sid: (cols, rows)} - most recently reported size 
 _ws_by_sid = {}             # {sid: set(WebSocket)}
 
 
-def _size_frame(cols, rows, applied=True):
+def _size_frame(cols, rows, initial=False):
     """Control frame for the browser. Binary on purpose: text frames are terminal output verbatim
-    (`term.write`), and there is no byte sequence a shell can be trusted never to print."""
-    return json.dumps({"t": "size", "c": cols, "r": rows, "applied": applied}).encode("utf-8")
+    (`term.write`), and there is no byte sequence a shell can be trusted never to print.
+
+    `initial` = the size at attach time, applied at once (nothing is on screen yet). Any other
+    size frame the browser applies only when ConPTY's post-resize repaint reaches it, so output
+    laid out for the old width is still drawn at the old width (see `applySize` in app.js)."""
+    return json.dumps({"t": "size", "c": cols, "r": rows, "initial": initial}).encode("utf-8")
 
 
-async def _push_size(sid, cols, rows, only=None):
+async def _push_size(sid, cols, rows, only=None, initial=False):
     targets = [only] if only is not None else list(_ws_by_sid.get(sid) or ())
     for w in targets:
         try:
-            await w.send_bytes(_size_frame(cols, rows))
+            await w.send_bytes(_size_frame(cols, rows, initial))
         except Exception:
             pass                        # a dying socket is cleaned up by its own handler
 
@@ -1180,7 +1184,7 @@ async def ws_term(ws: WebSocket, sid: str):
         cur = (int(sess["cols"]), int(sess["rows"]))
         _applied_size[sid] = cur          # the daemon's size IS the applied size after a server restart
     if cur:
-        await _push_size(sid, cur[0], cur[1], only=ws)
+        await _push_size(sid, cur[0], cur[1], only=ws, initial=True)
 
     # A RE-attach replays whatever the ring buffer holds, which starts mid-stream and, for a
     # TUI, is a diff against a screen this browser never had. The browser asks for a repaint

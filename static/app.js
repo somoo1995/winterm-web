@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 128;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 129;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -163,7 +163,7 @@
     imeProbe("end");
     // A size the server pushed mid-composition was parked (`applySize`) - apply it now, before
     // anything else, or the cell count stays wrong for as long as nothing else triggers it.
-    panes.forEach((p) => { if (p.pendingSize) applySize(p, p.pendingSize[0], p.pendingSize[1]); });
+    panes.forEach((p) => { if (p.pendingSize) { const s = p.pendingSize; p.pendingSize = null; applySize(p, s[0], s[1]); } });
     // flush any resize deferred during composition, else the size stays wrong
     if (typeof scheduleResize === "function") scheduleResize();
   }, true);
@@ -1160,7 +1160,7 @@
       if (ev.data instanceof ArrayBuffer) {       // control frame (see server `_size_frame`)
         let m = null;
         try { m = JSON.parse(new TextDecoder().decode(ev.data)); } catch (_) { return; }
-        if (m && m.t === "size" && m.c > 0 && m.r > 0) applySize(p, m.c, m.r);
+        if (m && m.t === "size" && m.c > 0 && m.r > 0) applySize(p, m.c, m.r, !!m.initial);
         // The backlog replay is over (server-side fact, see `mark_synced`). Release the
         // bottom pin now instead of guessing from silence; the kick's repaint that follows
         // must not count as replay.
@@ -1184,7 +1184,7 @@
         else lag.hidden = true;
         return;
       }
-      p.term.write(ev.data);
+      feed(p, ev.data);
       // Stay pinned to the bottom while the backlog replays.
       // Opening a tab creates the pane, attaches the WS and replays up to 2MB of backlog.
       // The buffer grows the whole time, so "scroll position" is not a meaningful concept
@@ -1398,15 +1398,62 @@
   // the wrong cells until the next complete repaint. Windows Terminal never has this window
   // because it resizes its buffer and ConPTY under one lock; the closest a web client can get
   // is to change nothing locally until the server says the PTY has that size.
-  function applySize(p, c, r) {
+  //
+  // WHEN the cell count changes matters as much as what it changes to. The server's ack comes
+  // before the daemon has resized the PTY, and output the app produced for the OLD width can
+  // still be on its way; drawn into a terminal that is already the new width it comes out as
+  // a staircase (2026-09-23: a 135-column paragraph in a 111-column xterm - reproduced
+  // offline from the raw bytes, and reflow ruled out). ConPTY marks the boundary itself: the
+  // first thing it sends after a resize is a full repaint, `ESC[H ESC[2K ...`. So a new size
+  // is parked and applied at the exact point in the stream where that repaint begins; the
+  // bytes before it are drawn at the old width, the repaint and everything after at the new.
+  // `initial` (the size at attach, nothing on screen yet) applies at once. If no repaint
+  // shows up - an idle shell - a timer applies it anyway.
+  const REPAINT_MARK = /\x1b\[H\x1b\[2K|\x1b\[2J/;
+  function applySize(p, c, r, initial) {
     if (!p || !c || !r) return;
     // Mid IME composition xterm must not be touched: a resize repositions the textarea and
     // the syllable being composed is dropped, leaking loose jamo. Park it; `compositionend`
-    // applies it.
+    // comes back through here.
     if (composing) { p.pendingSize = [c, r]; return; }
+    if (p.term.cols === c && p.term.rows === r) { p.pendingSize = null; return; }
+    if (initial) { p.pendingSize = null; try { p.term.resize(c, r); } catch (_) {} return; }
+    p.pendingSize = [c, r];
+    p.pendingAt = performance.now();
+    clearTimeout(p.pendingT);
+    p.pendingT = setTimeout(() => flushPendingSize(p, "timeout"), 1600);
+  }
+  function flushPendingSize(p, why) {
+    if (!p.pendingSize || composing) return;
+    const ps = p.pendingSize;
     p.pendingSize = null;
-    if (p.term.cols === c && p.term.rows === r) return;
-    try { p.term.resize(c, r); } catch (_) {}
+    clearTimeout(p.pendingT);
+    // Through the write chain, so it lands after everything already queued for the parser.
+    chain(p, () => new Promise((res) => { try { p.term.resize(ps[0], ps[1]); } catch (_) {} res(); }));
+  }
+  // All terminal output goes through one promise chain per pane. xterm's write() is queued
+  // and parsed later, so a resize issued "between" two writes would otherwise run before
+  // the earlier write was parsed.
+  function chain(p, step) {
+    p.chain = (p.chain || Promise.resolve()).then(step, step);
+    return p.chain;
+  }
+  function feed(p, data) {
+    chain(p, () => new Promise((res) => {
+      const ps = p.pendingSize;
+      if (ps && !composing) {
+        const m = REPAINT_MARK.exec(data);
+        if (m) {
+          const head = data.slice(0, m.index), tail = data.slice(m.index);
+          p.pendingSize = null;
+          clearTimeout(p.pendingT);
+          const go = () => { try { p.term.resize(ps[0], ps[1]); } catch (_) {} p.term.write(tail, res); };
+          if (head) p.term.write(head, go); else go();
+          return;
+        }
+      }
+      p.term.write(data, res);
+    }));
   }
 
   function resizePane(p) {
