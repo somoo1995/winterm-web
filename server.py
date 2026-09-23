@@ -1042,17 +1042,23 @@ async def _kick(sid, att, why):
     the left edge). A resize is the one event that makes ConPTY redraw everything, so this is the
     same trick the "refresh" button used by hand, now run by the server where it costs nothing.
 
-    Daemon-side only: the browsers keep their cell count. If they were told about the c-1 step
+    Daemon-side only: the browsers keep their cell count. If they were told about the step
     they would reflow twice for nothing.
+
+    ROWS, never columns. A column change makes ConPTY re-wrap every long line in its buffer,
+    and xterm re-wraps its own copy by its own rules; the two do not always agree, and from
+    then on the app's "cursor up N lines and erase" lands short on xterm and the top of the
+    previous frame stays on screen (the duplicated paragraphs of 2026-09-23). A row change
+    repaints without touching any wrapping.
     """
     cur = _applied_size.get(sid)
     if not cur:
         return
     c, r = cur
-    if c < 3:
+    if r < 3:
         return
     try:
-        await att.resize(c - 1, r)
+        await att.resize(c, r - 1)
         await asyncio.sleep(0.15)
         await att.resize(c, r)
         log.info("kick sid=%s %dx%d (%s)", sid, c, r, why)
@@ -1177,19 +1183,31 @@ async def ws_term(ws: WebSocket, sid: str):
         await _push_size(sid, cur[0], cur[1], only=ws)
 
     # A RE-attach replays whatever the ring buffer holds, which starts mid-stream and, for a
-    # TUI, is a diff against a screen this browser never had. Give the app a moment to finish
-    # replaying, then force a full repaint (see `_kick`). A session younger than a few seconds
-    # is a fresh shell whose backlog is complete, so it needs none.
-    try:
-        age = time.time() - float(sess.get("created") or 0)
-    except (TypeError, ValueError):
-        age = 0
-    kick_task = None
-    if age > 5:
-        async def _late_kick():
-            await asyncio.sleep(1.2)
-            await _kick(sid, att, "reattach")
-        kick_task = asyncio.create_task(_late_kick())
+    # TUI, is a diff against a screen this browser never had. The browser asks for a repaint
+    # (`kick`) once it has received the replay (`synced`), so the order is deterministic; a
+    # server-side timer here raced the replay and was dropped.
+
+    # "synced": the backlog replay is over. The daemon sends the whole ring buffer as its FIRST
+    # event after attach, so the browser is caught up right after the first output frame - or,
+    # for a fresh shell with nothing to replay, after a short silence. Before this the browser
+    # guessed the end of the replay from 250ms of silence with a 3s cap, and pinned the view to
+    # the bottom meanwhile; the reattach kick (1.2s) kept resetting that silence, so a user who
+    # scrolled up right after opening a tab was held for up to 3s and then thrown (2026-09-23).
+    synced = False
+
+    async def mark_synced():
+        nonlocal synced
+        if synced:
+            return
+        synced = True
+        try:
+            await ws.send_bytes(json.dumps({"t": "synced"}).encode("utf-8"))
+        except Exception:
+            pass
+
+    async def synced_fallback():
+        await asyncio.sleep(0.6)
+        await mark_synced()
 
     async def pump_out():
         """daemon -> browser"""
@@ -1198,8 +1216,11 @@ async def ws_term(ws: WebSocket, sid: str):
                 await ws.close(code=4000, reason="session ended")
                 return
             await ws.send_text(data)
+            if not synced:
+                await mark_synced()
 
     out_task = asyncio.create_task(pump_out())
+    sync_task = asyncio.create_task(synced_fallback())
     try:
         while True:
             raw = await ws.receive_text()
@@ -1225,6 +1246,10 @@ async def ws_term(ws: WebSocket, sid: str):
                     await _push_size(sid, target[0], target[1], only=ws)
             elif t == "kick":                 # the refresh button: repaint without a size change
                 await _kick(sid, att, "refresh")
+            elif t == "q":                    # "what size is the PTY really?" - answer with a size frame
+                cur = _applied_size.get(sid)
+                if cur:
+                    await _push_size(sid, cur[0], cur[1], only=ws)
             elif t == "unforce":
                 _forced_size.pop(sid, None)
                 _forced_by.pop(sid, None)
@@ -1238,8 +1263,7 @@ async def ws_term(ws: WebSocket, sid: str):
         log.info("ws error sid=%s: %s", sid, e)
     finally:
         out_task.cancel()
-        if kick_task:
-            kick_task.cancel()
+        sync_task.cancel()
         (_ws_by_sid.get(sid) or set()).discard(ws)
         if not _ws_by_sid.get(sid):
             _ws_by_sid.pop(sid, None)

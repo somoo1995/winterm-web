@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 126;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 128;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -868,7 +868,11 @@
     el.onmousedown = () => focusPane(sid);
     // once the user scrolls or types, stop all automatic scroll correction for that pane
     const markScrolled = () => {
-      if (p.replaying) return;         // scrolling is meaningless during replay (see above)
+      // The user wins, replay or not. Ignoring the wheel during replay held the view at the
+      // bottom for up to 3s after opening a tab and then let the queued scrolling fly. The
+      // replay is short now (`synced`), so the "dragged to the top by the growing buffer"
+      // problem that motivated the lock no longer has time to happen.
+      p.replaying = false;
       p.userScrolled = true;
       clearTimeout(p.settleT);
     };
@@ -1006,7 +1010,13 @@
     // `[?1;2c`. Drop those auto-replies, but only right after attaching.
     const AUTO_REPLY = /^\x1b\[\??[0-9;]*[cnR]$/;
     term.onData(d => {
-      if (performance.now() - p.attachedAt < 1500 && AUTO_REPLY.test(d)) return;
+      if (AUTO_REPLY.test(d)) {
+        if (performance.now() - p.attachedAt < 1500) return;
+        // Only the size owner answers terminal queries (device attributes, cursor position).
+        // With a phone attached as well, ConPTY asked once and got two answers, and the
+        // second one arrives as keystrokes to whatever is running.
+        if (!reportSize) return;
+      }
       wsend(p, { t: "i", d });
     });
     // Paste takes different paths for text and images.
@@ -1151,6 +1161,20 @@
         let m = null;
         try { m = JSON.parse(new TextDecoder().decode(ev.data)); } catch (_) { return; }
         if (m && m.t === "size" && m.c > 0 && m.r > 0) applySize(p, m.c, m.r);
+        // The backlog replay is over (server-side fact, see `mark_synced`). Release the
+        // bottom pin now instead of guessing from silence; the kick's repaint that follows
+        // must not count as replay.
+        if (m && m.t === "synced" && p.replaying) {
+          p.replaying = false;
+          clearTimeout(p.settleT);
+          if (!p.userScrolled) p.term.scrollToBottom();
+          // The replay of an OLD session starts mid-stream: for a TUI that is a diff against
+          // a screen this browser never had. Ask for a full repaint now that the replay is
+          // in (rows flap, no re-wrapping - see the server's `_kick`). A shell that was just
+          // spawned has a complete backlog and needs none.
+          const s = sessOf(p.sid);
+          if (s && s.created && Date.now() / 1000 - s.created > 5 && reportSize) wsend(p, { t: "kick" });
+        }
         return;
       }
       if (ev.data === "") {                       // ping echo = latency measurement
@@ -1391,6 +1415,7 @@
     // reposition the textarea, which breaks the character being composed.
     if (composing) return;
     if (reportSize) {
+      if (!fontsReady) return;       // measured with the wrong font = a resize for nothing
       // An open keyboard no longer blocks this. Bailing out on `kbOpen` left the screen
       // covered and the prompt invisible. The phone block now shrinks the body height when
       // the keyboard opens, so the fit result IS the visible area and demanding that size
@@ -1849,8 +1874,14 @@
     scheduleResize();
   }
 
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => setTimeout(remeasureCells, 60));
+  // No size report until the web fonts are in. Measured before that, the cell is the fallback
+  // font's width, so every tab opened at 108 columns and 400ms later asked for 111 - two PTY
+  // resizes, and a column change with wrapped text on screen is what leaves the top of the
+  // previous frame behind (see the server's `_kick`). One measurement, after the fonts.
+  let fontsReady = !(document.fonts && document.fonts.ready);
+  if (!fontsReady) {
+    document.fonts.ready.then(() => setTimeout(() => { fontsReady = true; remeasureCells(); }, 60));
+    setTimeout(() => { if (!fontsReady) { fontsReady = true; remeasureCells(); } }, 3000);  // never wait forever
   }
 
   // Refresh = fit to my screen AND force a repaint.
@@ -3292,7 +3323,19 @@
         const sess = sessions.find((x) => x.sid === sid);
         if (!sess) continue;
         const ok = p.term.cols === sess.cols && p.term.rows === sess.rows;
-        if (ok) continue;                       // matching sizes pass silently
+        if (ok) { p.mismatch = 0; continue; }   // matching sizes pass silently
+        // Not just a log line: a mismatch that survives two checks (10s) is corrected.
+        // The stream from the 2026-09-23 duplicates showed why it matters - ConPTY repaints
+        // with ESC[H and erases exactly ITS row count, so an xterm with more rows keeps the
+        // previous frame's tail below, and every later repaint stacks another copy on top.
+        // Ask the server for the real PTY size (a `size` frame applies it), and as the owner
+        // also re-offer this screen's size in case the earlier report was lost.
+        p.mismatch = (p.mismatch || 0) + 1;
+        if (p.mismatch >= 2) {
+          p.mismatch = 0;
+          wsend(p, { t: "q" });
+          if (reportSize) { p.reported = null; resizePane(p); }
+        }
         const box = p.el.getBoundingClientRect();
         rows.push({
           tab: sess.name, sid: sid.slice(0, 8),
