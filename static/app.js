@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 125;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 126;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -2297,7 +2297,9 @@
     box.classList.toggle("warn", !!(u.available || stale.length));
     btn.go.hidden = !(u.available && !u.dev);
     btn.server.hidden = !stale.some((s) => s.what === "server") && !stale.some((s) => s.what === "browser");
-    btn.daemon.hidden = !stale.some((s) => s.what === "daemon");
+    // Always offered here (the banner shows it only when the daemon is behind): "how do I
+    // restart the daemon?" should have an answer on screen. The confirm dialog is the guard.
+    btn.daemon.hidden = false;
     // A browser that is behind only needs a reload; reuse the server button's slot for that.
     if (stale.some((s) => s.what === "browser") && !stale.some((s) => s.what === "server")) {
       btn.server.textContent = tr("stale.reload");
