@@ -36,6 +36,15 @@ TIMEOUT = 8
 
 VERSION_FILE = os.path.join(BASE, "VERSION")
 
+# How the maintenance helpers (update / restart) are spawned. CREATE_NO_WINDOW alone.
+# CREATE_NO_WINDOW | DETACHED_PROCESS looked right and was WRONG: with both set, PowerShell
+# started and did nothing - not even a `Write-Output` to a file (measured 2026-09-23; the
+# daemon-restart button "worked" from the server's point of view and killed nothing).
+# CREATE_NEW_PROCESS_GROUP so a Ctrl+C / kill aimed at the server does not reach the helper
+# that is about to restart it.
+_SPAWN_FLAGS = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
 state = {
     "checked": 0.0,             # time.time() of the last attempt
     "local": None,              # VERSION on this disk ("" = file missing = very old install)
@@ -110,10 +119,9 @@ def start_update():
         return False, "tools/update.ps1 is missing"
     if not sys.platform.startswith("win"):
         return False, "in-app update is Windows only; run git pull / re-run the installer"
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
         subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
-                         cwd=BASE, creationflags=flags, close_fds=True,
+                         cwd=BASE, creationflags=_SPAWN_FLAGS, close_fds=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         return False, f"could not start the updater: {e}"
@@ -144,10 +152,9 @@ def restart_daemon():
         "Start-Sleep -Seconds 1; "
         f"& '{exe}' --no-browser"
     )
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
         subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-                         cwd=BASE, creationflags=flags, close_fds=True,
+                         cwd=BASE, creationflags=_SPAWN_FLAGS, close_fds=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         return False, f"could not start the restart: {e}"
@@ -161,9 +168,8 @@ def restart_server():
         cmd = [exe, "--restart", "--no-browser"]
     else:
         return False, "no launcher here; restart server.py by hand"
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
-        subprocess.Popen(cmd, cwd=BASE, creationflags=flags, close_fds=True,
+        subprocess.Popen(cmd, cwd=BASE, creationflags=_SPAWN_FLAGS, close_fds=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         return False, f"could not start the launcher: {e}"
