@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 import daemon_client as dc
+import mirror
 import pty_backend
 import updatecheck
 import version
@@ -588,7 +589,14 @@ async def api_health():
 
 @app.get("/api/sessions")
 async def api_list():
-    return await _ask({"op": "list"})
+    r = await _ask({"op": "list"})
+    # The daemon now sees one client per session - this server's hub - so the browser count
+    # has to come from here. app.js takes ownership when `clients <= 1` ("alone"); the
+    # daemon's constant 1 would make every observer grab the size from whoever is working.
+    if MIRROR_ON:
+        for s in r.get("sessions") or []:
+            s["clients"] = mirror.clients(s.get("sid"))
+    return r
 
 
 @app.post("/api/sessions")
@@ -1062,9 +1070,10 @@ async def _kick(sid, att, why):
     if r < 3:
         return
     try:
-        await att.resize(c, r - 1)
+        # `att` is the session's mirror hub; the model keeps its size through the flap, as the browsers do
+        await att.resize(c, r - 1, model=False)
         await asyncio.sleep(0.15)
-        await att.resize(c, r)
+        await att.resize(c, r, model=False)
         log.info("kick sid=%s %dx%d (%s)", sid, c, r, why)
     except Exception as e:
         log.info("kick failed sid=%s: %s", sid, e)
@@ -1156,9 +1165,134 @@ async def _sync_size(sid, att, force=None, owner=None):
     return target
 
 
-@app.websocket("/ws/{sid}")
-async def ws_term(ws: WebSocket, sid: str):
-    await ws.accept()
+async def _ws_term_mirror(ws: WebSocket, sid: str):
+    # Identity is the BROWSER, not the socket (see `_live_force`). The socket id is bundled in only for
+    # cleanup, since the same browser can briefly overlap two while reconnecting.
+    cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
+    client_id = (cid, id(ws))
+    try:
+        hub = await mirror.get_hub(sid)
+    except Exception as e:
+        log.info("attach failed sid=%s: %s", sid, e)
+        await ws.close(code=4004, reason="no such session")
+        return
+
+    log.info("ws attach sid=%s clients=%d", sid, hub.clients + 1)
+    _ws_by_sid.setdefault(sid, set()).add(ws)
+
+    # Restore from the server's screen model instead of replaying the ring buffer.
+    #
+    # The replay was output laid out for whatever width the PTY had back then, drawn into the
+    # width it has now - duplicated paragraphs and words dropped to the start of a line
+    # (2026-09-23). The model was fed every byte at the size it was produced for, so what goes
+    # out here is the screen as it IS: history rows, then the visible rows, cursor and modes.
+    #
+    # Order on this socket: size (initial) -> snapshot -> [pending size] -> synced -> live.
+    # `subscribe` registers the queue and requests the snapshot in one event-loop turn, so every
+    # chunk is either in the snapshot or in the queue - never both, never neither.
+    try:
+        q, snap, size, pending = await hub.subscribe()
+    except Exception as e:
+        # The hub died while the snapshot was being made (daemon connection lost). Not 4000:
+        # the session may well be alive, so let the browser retry - it gets a new hub.
+        log.info("snapshot failed sid=%s: %s", sid, e)
+        (_ws_by_sid.get(sid) or set()).discard(ws)
+        await ws.close(code=1011, reason="snapshot failed")
+        return
+    if not _applied_size.get(sid):
+        _applied_size[sid] = pending or size   # after a server restart the model's size IS the applied one
+    await _push_size(sid, size[0], size[1], only=ws, initial=True)
+    await ws.send_text(snap)
+    if pending:
+        # The PTY was already resized but ConPTY's repaint has not arrived yet. The browser
+        # parks this and applies it where the repaint starts - the same rule the model follows.
+        await _push_size(sid, pending[0], pending[1], only=ws)
+    await ws.send_bytes(json.dumps({"t": "synced"}).encode("utf-8"))
+
+    async def pump_out():
+        """hub -> browser"""
+        while True:
+            data = await q.get()
+            if data is None:
+                await ws.close(code=4000, reason="session ended")
+                return
+            if data is mirror.RESYNC:
+                # Fell too far behind to be sent every chunk, or the hub lost the daemon.
+                # Reconnecting gets a fresh snapshot (from a new hub if need be).
+                log.info("ws resync sid=%s", sid)
+                await ws.close(code=1013, reason="resync")
+                return
+            await ws.send_text(data)
+
+    out_task = asyncio.create_task(pump_out())
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            t = msg.get("t")
+            if t == "i":
+                await hub.input(msg.get("d", ""))
+            elif t == "r":
+                size = (int(msg.get("c", 120)), int(msg.get("r", 30)))
+                _client_sizes.setdefault(sid, {})[client_id] = size
+                _last_report[sid] = size          # the most recent reporter owns the size
+                # force=true means "fit to my screen" - keep this size even when others report
+                target = await _sync_size(sid, hub,
+                                          force=size if msg.get("force") else None,
+                                          owner=cid)
+                # The request changed nothing (already that size, or another client's pin won).
+                # The reporter is waiting for an answer to apply, so answer it with the size that
+                # actually holds. Silence here would leave it measuring and re-reporting forever.
+                if target and _applied_size.get(sid) == target:
+                    await _push_size(sid, target[0], target[1], only=ws)
+            elif t == "kick":                 # the refresh button: repaint without a size change
+                await _kick(sid, hub, "refresh")
+            elif t == "q":                    # "what size is the PTY really?" - answer with a size frame
+                cur = _applied_size.get(sid)
+                if cur:
+                    await _push_size(sid, cur[0], cur[1], only=ws)
+            elif t == "unforce":
+                _forced_size.pop(sid, None)
+                _forced_by.pop(sid, None)
+                _force_gone.pop(sid, None)
+                await _sync_size(sid, hub)
+            elif t == "ping":
+                await ws.send_text("")   # latency-measuring echo (an empty string isn't drawn)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.info("ws error sid=%s: %s", sid, e)
+    finally:
+        out_task.cancel()
+        hub.unsubscribe(q)
+        (_ws_by_sid.get(sid) or set()).discard(ws)
+        if not _ws_by_sid.get(sid):
+            _ws_by_sid.pop(sid, None)
+        # This client left, so recompute the size (when the phone leaves, revert to PC size).
+        # Apply only if clients remain - if nobody's left, don't touch the PTY size.
+        (_client_sizes.get(sid) or {}).pop(client_id, None)
+        if _client_sizes.get(sid):
+            try:
+                await _sync_size(sid, hub)
+            except Exception:
+                pass
+        else:
+            _client_sizes.pop(sid, None)
+            _last_report.pop(sid, None)
+            # Nobody left -> drop the force too, so the next client takes its own size
+            _forced_size.pop(sid, None)
+            _forced_by.pop(sid, None)
+            _force_gone.pop(sid, None)
+        # The hub stays: it keeps the model current while nobody watches, which is the point.
+        log.info("ws detach sid=%s (session stays alive in the daemon)", sid)
+
+
+async def _ws_term_replay(ws: WebSocket, sid: str):
+    """The pre-mirror path, kept verbatim for `screenMirror: false`: one daemon attach per
+    browser, restored by replaying the ring buffer."""
     att = dc.Attach(sid)
     # Identity is the BROWSER, not the socket (see `_live_force`). The socket id is bundled in only for
     # cleanup, since the same browser can briefly overlap two while reconnecting.
@@ -1288,6 +1422,22 @@ async def ws_term(ws: WebSocket, sid: str):
             _force_gone.pop(sid, None)
         att.close()
         log.info("ws detach sid=%s (session stays alive in the daemon)", sid)
+
+
+# Restore a reconnecting browser from the server's screen model (mirror.py) instead of replaying
+# the daemon's ring buffer. The switch exists so a problem with the model is one config line and a
+# web-server restart away from the old behaviour - no code rollback, no shell lost. Read once at
+# startup: hubs and the replay path must not mix within one server's lifetime.
+MIRROR_ON = bool(config.load().get("screenMirror", True))
+
+
+@app.websocket("/ws/{sid}")
+async def ws_term(ws: WebSocket, sid: str):
+    await ws.accept()
+    if MIRROR_ON:
+        await _ws_term_mirror(ws, sid)
+    else:
+        await _ws_term_replay(ws, sid)
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

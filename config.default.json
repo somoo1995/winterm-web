@@ -8,6 +8,13 @@
   "shell": "",
   "fontSize": 14.7,
   "fontFamily": "",
+  "screenMirror": true,
+  "_screenMirror": [
+    "true: a reconnecting browser is redrawn from the web server's screen model (mirror.py).",
+    "false: the old behaviour - replay the daemon's raw ring buffer. Output laid out for an older",
+    "  width then comes back as duplicated paragraphs. Keep it only as a way back if the model misbehaves.",
+    "Takes effect on a web-server restart; shells stay open."
+  ],
   "security": {
     "_readme": [
       "Access control itself is delegated to the network (a private network / Tailscale). What this",

@@ -144,7 +144,8 @@ class Attach:
     async def input(self, data):
         await self._send({"t": "i", "d": data})
 
-    async def resize(self, cols, rows):
+    async def resize(self, cols, rows, model=True):
+        # `model` is the mirror hub's flag (see mirror.Hub.resize); a plain attach has no model.
         await self._send({"t": "r", "c": cols, "r": rows})
 
     async def events(self):

@@ -25,6 +25,7 @@ Full license texts:
 | websockets | BSD-3-Clause |
 | pywinpty | MIT |
 | python-multipart | Apache-2.0 |
+| pyte | LGPL-3.0 (used unmodified as an installed library; never copied into this repo) |
 
 ## Inspiration (no code taken)
 

@@ -152,14 +152,17 @@ winterm-web owns the PTY directly, so real-time isn't an achievement; it's the d
 ```
 [session daemon daemon.py]   owns the PTY, stays alive (tmux-server role).  127.0.0.1:8771
       | local TCP (NDJSON)
-[web server server.py]       pure relay, holds zero session state.          127.0.0.1:8767
+[web server server.py]       relay + one screen model per session (pyte).   127.0.0.1:8767
       | HTTP + WebSocket
 [browser xterm.js]           close it and the session lives on
 ```
 
 **The point is that the web server and the daemon are separate.** Edit the code and
 restart the web server, and the open shells and their variables survive. Same when you
-close the browser — reconnect and the screen is restored from a ring buffer.
+close the browser — reconnect and the screen is redrawn from the web server's screen
+model: history and visible rows as they are now, not a replay of old output laid out for
+a width the terminal no longer has. Restarting the web server rebuilds that model from the
+daemon's ring buffer, so right after a restart the oldest history can be less tidy.
 
 ### One source tree, per-platform installers
 
