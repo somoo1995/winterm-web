@@ -1,5 +1,5 @@
 """
-webterm - server-side screen mirror (the tmux model for reconnects).
+webterm - restoring a reconnecting browser from a screen model (the tmux model for reconnects).
 
 Why this exists:
     A browser used to be restored by REPLAYING the daemon's ring buffer - up to 2MB of raw
@@ -7,39 +7,33 @@ Why this exists:
     current width it came out as duplicated paragraphs and words dropped to the start of a
     line (2026-09-23). No trick on the app side fixes that: measured on 2026-09-28, claude
     never re-prints history that has scrolled off - not on a row change, not on a column
-    change (100 -> 180 either), not on Ctrl+L. Only ConPTY's repaint of the visible rows.
+    change (100 -> 180 either), not on Ctrl+L, not on Ctrl+O.
 
-    So the server keeps the SCREEN instead of the stream: one pyte terminal per session is
-    fed every byte as it happens, at the size the PTY had at that moment. A browser that
-    attaches gets that screen - history plus the current rows - drawn once, then the live
-    stream from exactly the point the snapshot was taken.
+    So a screen is kept instead of a stream: a pyte terminal (screen_model.py) fed every byte
+    as it happens, at the size the PTY had at that moment. A browser that attaches gets that
+    screen - history plus the current rows - drawn once, then the live stream from exactly the
+    point the snapshot was taken.
 
-    [daemon] --raw--> [Hub: pyte model] --snapshot, then raw--> [browser, browser, ...]
+Where the model lives - two sources behind one surface (`open_view`):
+    DaemonView  the daemon keeps the model per session (session.py). Survives web server
+                restarts; the web server is a pure relay again.
+    Hub         fallback for a daemon that predates that: this server keeps one model per
+                session and fans out itself. A server restart rebuilds it from the ring buffer
+                and drops that history, so a restart cuts the scrollback.
 
-Cost, measured on the ring buffers of 8 live sessions (0.4-2.3MB each):
-    - memory 0.6-1.6MB per session - history is kept as rendered strings, not pyte cells
-      (pyte's own HistoryScreen keeps one object per cell)
-    - pyte parses ~1.6MB/s; live output is far below that, but seeding a fresh hub from a
-      2MB ring buffer takes ~1.3s, so the seed is fed in slices that yield to the event loop
-    - a snapshot takes 8-17ms to build
-
-pyte is LGPL-3.0 and used as an installed dependency only - never copy it into this repo.
+Cost, measured on 8 live sessions: 0.6-1.6MB per session; pyte parses ~0.6-1.6MB/s depending
+on the output; under a 100KB/s burst the Hub costs ~+18% of a core over plain relaying.
 """
 import asyncio
 import collections
 import logging
-import re
 import time
 
-import pyte
-from pyte import graphics
-from pyte.screens import Margins
-
 import daemon_client as dc
+from screen_model import Mirror
 
 log = logging.getLogger("webterm.mirror")
 
-HISTORY_LINES = 5000            # per session. ~1-2MB as rendered strings (measured)
 MODEL_SLICE = 1024               # chars parsed per event-loop turn (a few ms of pyte at worst)
 MODEL_BACKLOG_MAX = 8 * 1024 * 1024   # chars waiting for the parser before the model resets
 COALESCE_MAX = 64 * 1024        # chars of queued output merged into one feed
@@ -50,199 +44,6 @@ SIZE_FALLBACK = 1.6             # seconds - same as app.js: no repaint seen, app
 # Queue item telling a browser socket to close and reconnect (it comes back with a fresh
 # snapshot). An object, not a string: a shell can print any string, "resync" included.
 RESYNC = object()
-
-# Same boundary as app.js `REPAINT_MARK`: the first thing ConPTY sends after a resize is a full
-# repaint, so a new size takes effect exactly there. Bytes before it were laid out for the old size.
-REPAINT_MARK = re.compile(r"\x1b\[H\x1b\[2K|\x1b\[2J")
-
-# DEC private modes a snapshot must re-establish. They change what the browser SENDS (cursor
-# keys, bracketed paste, mouse, focus), so a restored screen without them types wrong -
-# the Home/End and pasted-image-path incidents both came from a mode xterm never learned.
-_PRIVATE_MODES = (1, 1000, 1002, 1003, 1004, 1006, 2004)
-
-_FG = {v: k for k, v in graphics.FG_ANSI.items()}
-_FG.update({v: k for k, v in graphics.FG_AIXTERM.items()})
-_BG = {v: k for k, v in graphics.BG_ANSI.items()}
-_BG.update({v: k for k, v in graphics.BG_AIXTERM.items()})
-
-
-def _color(c, fg):
-    """pyte color (name or 6-digit hex) -> SGR parameters, or None for the default."""
-    if c == "default":
-        return None
-    table = _FG if fg else _BG
-    if c in table:
-        return str(table[c])
-    if len(c) == 6:
-        try:
-            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-        except ValueError:
-            return None
-        return f"{38 if fg else 48};2;{r};{g};{b}"
-    return None
-
-
-_SGR_CACHE = {}
-
-
-def _sgr(ch):
-    """SGR for a cell's attributes. Cached: a screen uses a handful of attribute sets, and
-    building the string per cell was a third of the cost of turning a row into history."""
-    key = ch[1:]                      # everything but the glyph
-    s = _SGR_CACHE.get(key)
-    if s is None:
-        if len(_SGR_CACHE) > 4096:    # truecolor output could grow this without bound
-            _SGR_CACHE.clear()
-        s = _SGR_CACHE[key] = _build_sgr(ch)
-    return s
-
-
-def _build_sgr(ch):
-    parts = ["0"]
-    if ch.bold:
-        parts.append("1")
-    if ch.italics:
-        parts.append("3")
-    if ch.underscore:
-        parts.append("4")
-    if ch.blink:
-        parts.append("5")
-    if ch.reverse:
-        parts.append("7")
-    if ch.strikethrough:
-        parts.append("9")
-    f = _color(ch.fg, True)
-    if f:
-        parts.append(f)
-    b = _color(ch.bg, False)
-    if b:
-        parts.append(b)
-    return "\x1b[" + ";".join(parts) + "m"
-
-
-def render_line(line, cols):
-    """One pyte row -> text with SGR. Trailing default blanks are dropped."""
-    # Only the cells that exist - a pyte row is a sparse dict and missing cells are blank
-    # (dict.get / iteration never trigger its __missing__, so nothing is inserted).
-    xs = sorted(x for x in line if x < cols)
-    while xs:
-        ch = line[xs[-1]]
-        if ch.data in (" ", "") and ch.bg == "default" and not ch.reverse:
-            xs.pop()
-        else:
-            break
-    out, cur, nxt = [], "\x1b[0m", 0
-    for x in xs:
-        ch = line[x]
-        if ch.data == "":             # right half of a wide glyph
-            nxt = x + 1
-            continue
-        if x > nxt:                   # a gap of missing (blank, default) cells
-            if cur != "\x1b[0m":
-                out.append("\x1b[0m")
-                cur = "\x1b[0m"
-            out.append(" " * (x - nxt))
-        s = _sgr(ch)
-        if s != cur:
-            out.append(s)
-            cur = s
-        out.append(ch.data)
-        nxt = x + 1
-    if cur != "\x1b[0m":
-        out.append("\x1b[0m")
-    return "".join(out)
-
-
-class MirrorScreen(pyte.Screen):
-    """A pyte screen whose scrolled-off rows are kept as rendered strings."""
-
-    def __init__(self, columns, lines, history=HISTORY_LINES):
-        self.history = collections.deque(maxlen=history)
-        super().__init__(columns, lines)
-
-    def _push(self, y):
-        self.history.append(render_line(self.buffer[y], self.columns))
-
-    def index(self):
-        top, bottom = self.margins or Margins(0, self.lines - 1)
-        if self.cursor.y == bottom and top == 0:     # a real scroll, not one inside a region
-            self._push(0)
-        super().index()
-
-    def erase_in_display(self, how=0, *args, **kwargs):
-        if how == 3:                                 # ED 3 = clear scrollback
-            self.history.clear()
-        super().erase_in_display(how, *args, **kwargs)
-
-    def resize(self, lines=None, columns=None):
-        lines = lines or self.lines
-        if lines < self.lines:
-            # pyte drops rows off the top on a shrink; they belong in history, not in the bin
-            for y in range(self.lines - lines):
-                self._push(y)
-        super().resize(lines, columns)
-
-
-class Mirror:
-    """The screen model of one session, plus the pending-size rule shared with app.js."""
-
-    def __init__(self, cols, rows, history=HISTORY_LINES):
-        self.screen = MirrorScreen(cols, rows, history)
-        self.stream = pyte.Stream(self.screen)
-        self.pending = None
-
-    @property
-    def size(self):
-        return self.screen.columns, self.screen.lines
-
-    def resize(self, cols, rows):
-        if (cols, rows) == self.size:
-            self.pending = None
-        else:
-            self.pending = (cols, rows)
-
-    def flush_pending(self):
-        if self.pending:
-            c, r = self.pending
-            self.pending = None
-            self.screen.resize(r, c)
-
-    def feed(self, data):
-        if self.pending:
-            m = REPAINT_MARK.search(data)
-            if m:
-                if m.start():
-                    self.stream.feed(data[:m.start()])
-                self.flush_pending()
-                data = data[m.start():]
-        self.stream.feed(data)
-
-    def snapshot(self):
-        """Everything a blank xterm of this size needs to look exactly like the model."""
-        s = self.screen
-        out = ["\x1b[0m"]
-        for ln in s.history:
-            out.append(ln)
-            out.append("\r\n")
-        for y in range(s.lines):
-            out.append(render_line(s.buffer[y], s.columns))
-            if y < s.lines - 1:
-                out.append("\r\n")
-        if s.margins and (s.margins.top, s.margins.bottom) != (0, s.lines - 1):
-            out.append(f"\x1b[{s.margins.top + 1};{s.margins.bottom + 1}r")
-        c = s.cursor
-        out.append(f"\x1b[{c.y + 1};{c.x + 1}H")
-        out.append(_sgr(c.attrs))
-        for m in _PRIVATE_MODES:
-            out.append(f"\x1b[?{m}{'h' if (m << 5) in s.mode else 'l'}")
-        out.append("\x1b[?7h" if pyte.modes.DECAWM in s.mode else "\x1b[?7l")
-        out.append("\x1b[?25l" if c.hidden else "\x1b[?25h")
-        return "".join(out)
-
-    def text(self):
-        """The current screen as plain text (what a person would read)."""
-        return "\n".join(ln.rstrip() for ln in self.screen.display)
-
 
 class Hub:
     """One daemon attach per session, shared by every browser on it.
@@ -519,10 +320,106 @@ async def get_hub(sid):
         return h
 
 
+class DaemonView:
+    """One browser's own daemon attach, restored from the DAEMON's screen model.
+
+    The daemon keeps the model from a session's first byte (session.py), so it survives web
+    server restarts - which the Hub cannot: a restarted Hub has to rebuild from the ring
+    buffer, and that rebuild was either the staircase again or history thrown away
+    (2026-09-28: a 2,166-row scrollback cut at the restart). With this, the web server is back
+    to a pure relay: one attach per browser, fan-out in the daemon.
+
+    Same surface as Hub for `ws_term`: subscribe / unsubscribe / input / resize / clients.
+    """
+
+    def __init__(self, sid):
+        self.sid = sid
+        self.att = dc.Attach(sid)
+        self._task = None
+
+    async def open(self):
+        """-> True when the daemon answered with a snapshot, False when it is too old to."""
+        info = await self.att.open(snapshot=True)
+        return bool((info or {}).get("snapshot"))
+
+    async def subscribe(self):
+        events = self.att.events()
+        kind, m = await asyncio.wait_for(events.__anext__(), 30)
+        if kind != "snap":
+            raise dc.DaemonDown(f"expected a snapshot, got {kind!r}")
+        q = asyncio.Queue()
+
+        async def pump():
+            ended = False
+            try:
+                async for kind, data in events:
+                    if kind == "end":
+                        ended = True
+                        break
+                    if kind == "out":
+                        q.put_nowait(data)
+            except Exception as e:
+                log.info("daemon view error sid=%s: %s", self.sid, e)
+            # A real end tells the browser to stop (4000); a lost connection makes it reconnect.
+            q.put_nowait(None if ended else RESYNC)
+
+        self._task = asyncio.create_task(pump())
+        pending = m.get("pending")
+        return q, m.get("data", ""), (m.get("cols"), m.get("rows")), tuple(pending) if pending else None
+
+    def unsubscribe(self, q):
+        if self._task:
+            self._task.cancel()
+        self.att.close()
+
+    @property
+    def clients(self):
+        return 0          # the daemon counts its own attaches; /api/sessions passes that through
+
+    async def input(self, data):
+        await self.att.input(data)
+
+    async def resize(self, cols, rows, model=True):
+        await self.att.resize(cols, rows, model=model)
+
+
+_daemon_mirror = {"at": 0.0, "value": None}
+
+
+async def _daemon_has_mirror():
+    """Does the running daemon keep screen models? Cached briefly - asked on every attach."""
+    now = time.monotonic()
+    if _daemon_mirror["value"] is not None and now - _daemon_mirror["at"] < 10:
+        return _daemon_mirror["value"]
+    try:
+        res = await dc.request({"op": "ping"}, timeout=3)
+        value = bool((res.get("result") or {}).get("mirror"))
+    except Exception:
+        value = False
+    _daemon_mirror.update(at=now, value=value)
+    return value
+
+
+async def open_view(sid):
+    """The source a browser on `sid` is restored from and relayed through.
+
+    A daemon with screen models (after the daemon restart that loads session.py with them):
+    the browser gets its own DaemonView. An older daemon: the shared Hub, which keeps the
+    model here in the web server. Raises dc.DaemonDown if there is no such session."""
+    if await _daemon_has_mirror():
+        v = DaemonView(sid)
+        try:
+            if await v.open():
+                return v
+        except Exception:
+            v.att.close()
+            raise
+        v.att.close()                    # the ack said no snapshot after all - fall back
+        _daemon_mirror.update(at=time.monotonic(), value=False)
+    return await get_hub(sid)
+
+
 def clients(sid):
+    """Browsers on a Hub, or None when there is no Hub (the daemon's own count is then right)."""
     h = _hubs.get(sid)
-    return h.clients if h else 0
-
-
-def peek(sid):
-    return _hubs.get(sid)
+    return h.clients if h else None

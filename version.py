@@ -26,8 +26,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 
 # Which files belong to which process. The split is the whole point: it decides whether the user
 # is told "restart, nothing is lost" or "restart, and your shells will close".
-SERVER_FILES = ("server.py", "mirror.py", "config.py", "daemon_client.py", "version.py", "updatecheck.py")
-DAEMON_FILES = ("daemon.py", "session.py", "pty_backend.py", "envclean.py")
+SERVER_FILES = ("server.py", "mirror.py", "screen_model.py", "config.py", "daemon_client.py", "version.py", "updatecheck.py")
+DAEMON_FILES = ("daemon.py", "session.py", "screen_model.py", "pty_backend.py", "envclean.py")
 
 
 def _digest(names):

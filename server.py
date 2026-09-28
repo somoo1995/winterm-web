@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 import config
 import daemon_client as dc
 import mirror
+import screen_model
 import pty_backend
 import updatecheck
 import version
@@ -590,12 +591,15 @@ async def api_health():
 @app.get("/api/sessions")
 async def api_list():
     r = await _ask({"op": "list"})
-    # The daemon now sees one client per session - this server's hub - so the browser count
-    # has to come from here. app.js takes ownership when `clients <= 1` ("alone"); the
+    # A session served through a Hub is ONE client to the daemon - this server - so the browser
+    # count has to come from here. app.js takes ownership when `clients <= 1` ("alone"); the
     # daemon's constant 1 would make every observer grab the size from whoever is working.
+    # Sessions on DaemonViews have one daemon attach per browser, so the daemon's count stands.
     if MIRROR_ON:
         for s in r.get("sessions") or []:
-            s["clients"] = mirror.clients(s.get("sid"))
+            n = mirror.clients(s.get("sid"))
+            if n is not None:
+                s["clients"] = n
     return r
 
 
@@ -1171,16 +1175,17 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
     cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
     client_id = (cid, id(ws))
     try:
-        hub = await mirror.get_hub(sid)
+        # The daemon's model when it keeps one (DaemonView), else this server's (Hub).
+        hub = await mirror.open_view(sid)
     except Exception as e:
         log.info("attach failed sid=%s: %s", sid, e)
         await ws.close(code=4004, reason="no such session")
         return
 
-    log.info("ws attach sid=%s clients=%d", sid, hub.clients + 1)
+    log.info("ws attach sid=%s via=%s", sid, type(hub).__name__)
     _ws_by_sid.setdefault(sid, set()).add(ws)
 
-    # Restore from the server's screen model instead of replaying the ring buffer.
+    # Restore from a screen model instead of replaying the ring buffer.
     #
     # The replay was output laid out for whatever width the PTY had back then, drawn into the
     # width it has now - duplicated paragraphs and words dropped to the start of a line
@@ -1196,6 +1201,7 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
         # The hub died while the snapshot was being made (daemon connection lost). Not 4000:
         # the session may well be alive, so let the browser retry - it gets a new hub.
         log.info("snapshot failed sid=%s: %s", sid, e)
+        hub.unsubscribe(None)                 # a DaemonView closes its attach here
         (_ws_by_sid.get(sid) or set()).discard(ws)
         await ws.close(code=1011, reason="snapshot failed")
         return
@@ -1424,11 +1430,14 @@ async def _ws_term_replay(ws: WebSocket, sid: str):
         log.info("ws detach sid=%s (session stays alive in the daemon)", sid)
 
 
-# Restore a reconnecting browser from the server's screen model (mirror.py) instead of replaying
-# the daemon's ring buffer. The switch exists so a problem with the model is one config line and a
-# web-server restart away from the old behaviour - no code rollback, no shell lost. Read once at
-# startup: hubs and the replay path must not mix within one server's lifetime.
-MIRROR_ON = bool(config.load().get("screenMirror", True))
+# Restore a reconnecting browser from a screen model (the daemon's, or this server's Hub - see
+# mirror.py) instead of replaying the daemon's ring buffer. The switch exists so a problem with the
+# model is one config line and a web-server restart away from the old behaviour - no code rollback,
+# no shell lost. Read once at startup: hubs and the replay path must not mix within one server's
+# lifetime. Without pyte installed there is no model anywhere, so it is off regardless.
+MIRROR_ON = bool(config.load().get("screenMirror", True)) and screen_model.AVAILABLE
+if not screen_model.AVAILABLE:
+    log.warning("pyte is not installed - reconnects replay the ring buffer (pip install -r requirements.txt)")
 
 
 @app.websocket("/ws/{sid}")

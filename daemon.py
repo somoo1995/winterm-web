@@ -24,6 +24,15 @@ Protocol (one line = one JSON object):
         send: {"op":"attach","sid":..}
         recv: {"ev":"out","data":".."} / {"ev":"end"}
         after that, client->daemon uses the same shape as the browser WS ({"t":"i"|"r"}), relayed as-is
+        ({"t":"r",..,"m":0} = resize the PTY but not the screen model - the web server's kick)
+
+        send: {"op":"attach","sid":..,"snapshot":true}      (when ping says "mirror": true)
+        recv: ack with "snapshot": true, then
+              {"ev":"snap","data":..,"cols":..,"rows":..,"pending":[c,r]|null}
+              instead of the ring buffer, then {"ev":"out"} / {"ev":"end"} as above.
+              The snapshot is the session's screen model: history and visible rows drawn at the
+              size they were produced for, where the ring buffer replay is raw output drawn at
+              whatever size the terminal has now.
 """
 import asyncio
 import json
@@ -65,6 +74,7 @@ except PtyUnavailable as e:
     print(f"winterm-web: {e}", file=sys.stderr)
     sys.exit(1)
 
+import screen_model  # noqa: E402
 from session import SessionManager  # noqa: E402
 
 HOST = "127.0.0.1"
@@ -82,7 +92,9 @@ async def handle_control(w, msg):
     op = msg.get("op")
     if op == "ping":
         return {"ok": True, "result": {"pid": os.getpid(), "sessions": len(mgr.sessions),
-                                       "code": RUNNING_CODE}}
+                                       "code": RUNNING_CODE,
+                                       # attach can hand out a screen-model snapshot
+                                       "mirror": screen_model.AVAILABLE}}
     if op == "list":
         mgr.reap()
         return {"ok": True, "result": {"sessions": mgr.list()}}
@@ -118,20 +130,31 @@ async def handle_control(w, msg):
     return {"ok": False, "error": f"unknown op {op!r}"}
 
 
-async def handle_attach(r, w, sid):
+async def handle_attach(r, w, sid, snapshot=False):
     """Turn this connection into a stream dedicated to one session."""
     s = mgr.get(sid)
     if s is None:
         await send(w, {"ok": False, "error": "no such session"})
         return
-    await send(w, {"ok": True, "result": {"session": s.info()}})
+    snapshot = bool(snapshot and s.model)
+    await send(w, {"ok": True, "result": {"session": s.info(), "snapshot": snapshot}})
 
-    backlog = s.backlog()
-    if backlog:
-        await send(w, {"ev": "out", "data": backlog})
-
-    q = s.subscribe()
-    log.info("attach sid=%s clients=%d", sid, len(s._subs))
+    if snapshot:
+        q, fut = s.subscribe_snapshot()
+        try:
+            snap, size, pending = await asyncio.wait_for(asyncio.wrap_future(fut), 30)
+        except Exception as e:
+            s.unsubscribe(q)
+            log.info("snapshot failed sid=%s: %s", sid, e)
+            return
+        await send(w, {"ev": "snap", "data": snap, "cols": size[0], "rows": size[1],
+                       "pending": list(pending) if pending else None})
+    else:
+        backlog = s.backlog()
+        if backlog:
+            await send(w, {"ev": "out", "data": backlog})
+        q = s.subscribe()
+    log.info("attach sid=%s clients=%d snapshot=%s", sid, len(s._subs), snapshot)
 
     async def pump_out():
         while True:
@@ -155,7 +178,7 @@ async def handle_attach(r, w, sid):
             if t == "i":
                 s.write(m.get("d", ""))
             elif t == "r":
-                s.resize(m.get("c", 120), m.get("r", 30))
+                s.resize(m.get("c", 120), m.get("r", 30), model=m.get("m", 1) != 0)
     except (ConnectionResetError, asyncio.IncompleteReadError):
         pass
     except Exception as e:
@@ -173,7 +196,7 @@ async def on_client(r, w):
             return
         msg = json.loads(line)
         if msg.get("op") == "attach":
-            await handle_attach(r, w, msg.get("sid"))
+            await handle_attach(r, w, msg.get("sid"), snapshot=msg.get("snapshot"))
             return
         await send(w, await handle_control(w, msg))
     except Exception as e:

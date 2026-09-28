@@ -21,6 +21,7 @@ import urllib.parse
 import uuid
 
 import pty_backend
+import screen_model
 from pty_backend import IS_WINDOWS, POLL_IDLE
 
 log = logging.getLogger("webterm.session")
@@ -101,6 +102,15 @@ class Session:
         self._ring_lock = threading.Lock()
         self._subs = set()                    # set of asyncio.Queue
         self._subs_lock = threading.Lock()
+        # Held while a chunk goes to the model and out to the subscribers, and while a subscriber
+        # is registered with a snapshot request - so every chunk is either in that snapshot or
+        # in that subscriber's queue, never both and never neither.
+        self._order_lock = threading.Lock()
+        # The screen a reconnecting client is drawn from (screen_model.py). Fed from the first
+        # byte at the size the PTY had at that moment, so unlike the ring buffer it never has to
+        # be reinterpreted at a width it was not produced for. None when pyte is not installed.
+        self.model = (screen_model.ThreadedModel(cols, rows, sid[:8])
+                      if screen_model.AVAILABLE else None)
         self._alive = True
         self._exit_code = None
         # Window title the shell/app reports via OSC. Single source of "what's running in this session"
@@ -137,9 +147,14 @@ class Session:
                 break
             if data:
                 self._scan_title(data)
-                self._append_ring(data)
-                self._broadcast(data)
+                with self._order_lock:
+                    self._append_ring(data)
+                    if self.model:
+                        self.model.push(data)
+                    self._broadcast(data)
         self._alive = False
+        if self.model:
+            self.model.close()
         self._exit_code = self.pty.exit_status()
         log.info("session ended sid=%s exit=%s", self.sid, self._exit_code)
         self._broadcast(None)  # end signal
@@ -267,6 +282,16 @@ class Session:
             self._subs.add(q)
         return q
 
+    def subscribe_snapshot(self):
+        """-> (queue, concurrent Future of (snapshot, size, pending)).
+
+        The queue gets every chunk read after this call; the snapshot is the model after every
+        chunk read before it. Both happen under the order lock the reader thread takes per chunk."""
+        with self._order_lock:
+            q = self.subscribe()
+            fut = self.model.request_snapshot()
+        return q, fut
+
     def unsubscribe(self, q):
         with self._subs_lock:
             self._subs.discard(q)
@@ -280,7 +305,11 @@ class Session:
         if self._alive:
             self.pty.write(data)
 
-    def resize(self, cols, rows):
+    def resize(self, cols, rows, model=True):
+        """`model=False` is the web server's kick: a one-row flap to make ConPTY repaint. The
+        clients keep their cell count through it, so the model must too - following it pushed
+        the top row into history on the shrink and drew it again after the regrow (one
+        duplicated row per kick, measured)."""
         # Concurrent-attach policy: "the size of whoever attached last" (not tmux's smallest-window compromise)
         if not self._alive:
             return
@@ -289,14 +318,19 @@ class Session:
         if (cols, rows) == (self.cols, self.rows):
             return
         self.cols, self.rows = cols, rows
-        try:
-            self.pty.set_size(cols, rows)
-        except Exception as e:
-            log.warning("resize failed sid=%s: %s", self.sid, e)
+        with self._order_lock:
+            try:
+                self.pty.set_size(cols, rows)
+            except Exception as e:
+                log.warning("resize failed sid=%s: %s", self.sid, e)
+            if self.model and model:
+                self.model.resize(cols, rows)
 
     def close(self):
         self._alive = False
         self.pty.close()              # interrupt + reap; the how differs per platform
+        if self.model:
+            self.model.close()
         self._broadcast(None)
 
     @property

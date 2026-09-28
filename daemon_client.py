@@ -126,9 +126,14 @@ class Attach:
         self.r = None
         self.w = None
 
-    async def open(self):
+    async def open(self, snapshot=False):
+        """`snapshot=True` asks for the screen model instead of the ring buffer. Only a daemon
+        whose ping says "mirror" honours it - check the ack's `snapshot` before relying on it."""
         self.r, self.w = await connect()
-        await self._send({"op": "attach", "sid": self.sid})
+        msg = {"op": "attach", "sid": self.sid}
+        if snapshot:
+            msg["snapshot"] = True
+        await self._send(msg)
         line = await self.r.readline()
         if not line:
             raise DaemonDown("attach failed")
@@ -145,11 +150,12 @@ class Attach:
         await self._send({"t": "i", "d": data})
 
     async def resize(self, cols, rows, model=True):
-        # `model` is the mirror hub's flag (see mirror.Hub.resize); a plain attach has no model.
-        await self._send({"t": "r", "c": cols, "r": rows})
+        # model=False (the kick's row flap) leaves the daemon's screen model at its size.
+        # A daemon without a model ignores "m".
+        await self._send({"t": "r", "c": cols, "r": rows, "m": 1 if model else 0})
 
     async def events(self):
-        """Output stream pushed by the daemon: ('out', str) or ('end', None)."""
+        """Output stream pushed by the daemon: ('out', str), ('snap', dict) or ('end', None)."""
         while True:
             line = await self.r.readline()
             if not line:
@@ -161,6 +167,8 @@ class Attach:
             ev = m.get("ev")
             if ev == "out":
                 yield "out", m.get("data", "")
+            elif ev == "snap":
+                yield "snap", m
             elif ev == "end":
                 yield "end", None
                 return
