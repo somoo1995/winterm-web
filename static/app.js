@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 130;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 131;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1180,11 +1180,14 @@
           // Only when no resize is about to happen anyway: a size change already makes
           // ConPTY repaint everything, and a kick on top of it is one more moment where the
           // two row counts differ while output may scroll (the vertical drift of 14:38).
+          // Not after a restore from a screen model (`m.model`): that screen is exact, and the
+          // kick only makes claude redraw its live region - on a phone, where that region is
+          // taller than the screen, each redraw leaves a copy in the scrollback (2026-09-29).
           const s = sessOf(p.sid);
           let d = null;
           try { d = p.fit.proposeDimensions(); } catch (_) {}
           const sameSize = !d || (d.cols === p.term.cols && d.rows === p.term.rows);
-          if (s && s.created && Date.now() / 1000 - s.created > 5 && reportSize && sameSize) wsend(p, { t: "kick" });
+          if (!m.model && s && s.created && Date.now() / 1000 - s.created > 5 && reportSize && sameSize) wsend(p, { t: "kick" });
         }
         return;
       }

@@ -1213,7 +1213,11 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
         # The PTY was already resized but ConPTY's repaint has not arrived yet. The browser
         # parks this and applies it where the repaint starts - the same rule the model follows.
         await _push_size(sid, pending[0], pending[1], only=ws)
-    await ws.send_bytes(json.dumps({"t": "synced"}).encode("utf-8"))
+    # `model`: this screen came from a model, so it is already exact - the browser must not
+    # follow it with the reattach kick. That kick existed to repair a replay; on a model it only
+    # makes claude redraw its live region, and when that region is taller than the screen (a
+    # phone, 28 rows or 14 with the keyboard up) every redraw leaves a copy in the scrollback.
+    await ws.send_bytes(json.dumps({"t": "synced", "model": True}).encode("utf-8"))
 
     async def pump_out():
         """hub -> browser"""
