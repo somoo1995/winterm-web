@@ -27,6 +27,7 @@ on the output; under a 100KB/s burst the Hub costs ~+18% of a core over plain re
 import asyncio
 import collections
 import logging
+import re
 import time
 
 import daemon_client as dc
@@ -332,10 +333,11 @@ class DaemonView:
     Same surface as Hub for `ws_term`: subscribe / unsubscribe / input / resize / clients.
     """
 
-    def __init__(self, sid):
+    def __init__(self, sid, model_version=1):
         self.sid = sid
         self.att = dc.Attach(sid)
         self._task = None
+        self._model_version = model_version
 
     async def open(self):
         """-> True when the daemon answered with a snapshot, False when it is too old to."""
@@ -365,7 +367,10 @@ class DaemonView:
 
         self._task = asyncio.create_task(pump())
         pending = m.get("pending")
-        return q, m.get("data", ""), (m.get("cols"), m.get("rows")), tuple(pending) if pending else None
+        data = m.get("data", "")
+        if self._model_version < 2:
+            data = _strip_underline(data)
+        return q, data, (m.get("cols"), m.get("rows")), tuple(pending) if pending else None
 
     def unsubscribe(self, q):
         if self._task:
@@ -383,7 +388,21 @@ class DaemonView:
         await self.att.resize(cols, rows, model=model)
 
 
-_daemon_mirror = {"at": 0.0, "value": None}
+# A version-1 model (a daemon started before screen_model.MODEL_VERSION 2) read claude's
+# `ESC[>4m` as SGR 4, so its cells carry an underline that was never in the output - and the
+# snapshot's closing SGR handed that underline to the browser, where everything printed after it
+# came out underlined (2026-09-29). The model cannot be repaired from here, so the snapshot is:
+# the underline parameter is taken out of every SGR it emits (see screen_model._build_sgr for the
+# parameter order: 0, bold 1, italic 3, underline 4, ...). A real underline in such a snapshot is
+# lost too; it stops mattering once the daemon restarts with the fixed model.
+_UNDERLINE_PARAM = re.compile(r"(\x1b\[0(?:;1)?(?:;3)?);4(?=[;m])")
+
+
+def _strip_underline(snapshot):
+    return _UNDERLINE_PARAM.sub(r"\1", snapshot)
+
+
+_daemon_mirror = {"at": 0.0, "value": None, "model": 1}
 
 
 async def _daemon_has_mirror():
@@ -393,10 +412,12 @@ async def _daemon_has_mirror():
         return _daemon_mirror["value"]
     try:
         res = await dc.request({"op": "ping"}, timeout=3)
-        value = bool((res.get("result") or {}).get("mirror"))
+        result = res.get("result") or {}
+        value = bool(result.get("mirror"))
+        model = int(result.get("model") or 1)
     except Exception:
-        value = False
-    _daemon_mirror.update(at=now, value=value)
+        value, model = False, 1
+    _daemon_mirror.update(at=now, value=value, model=model)
     return value
 
 
@@ -407,7 +428,7 @@ async def open_view(sid):
     the browser gets its own DaemonView. An older daemon: the shared Hub, which keeps the
     model here in the web server. Raises dc.DaemonDown if there is no such session."""
     if await _daemon_has_mirror():
-        v = DaemonView(sid)
+        v = DaemonView(sid, model_version=_daemon_mirror["model"])
         try:
             if await v.open():
                 return v

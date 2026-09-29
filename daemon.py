@@ -94,7 +94,9 @@ async def handle_control(w, msg):
         return {"ok": True, "result": {"pid": os.getpid(), "sessions": len(mgr.sessions),
                                        "code": RUNNING_CODE,
                                        # attach can hand out a screen-model snapshot
-                                       "mirror": screen_model.AVAILABLE}}
+                                       "mirror": screen_model.AVAILABLE,
+                                       # which model: lets the web server work around older ones
+                                       "model": screen_model.MODEL_VERSION}}
     if op == "list":
         mgr.reap()
         return {"ok": True, "result": {"sessions": mgr.list()}}

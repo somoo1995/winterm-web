@@ -26,6 +26,24 @@ HISTORY_LINES = 5000            # per session. ~1-2MB as rendered strings (measu
 # repaint, so a new size takes effect exactly there. Bytes before it were laid out for the old size.
 REPAINT_MARK = re.compile(r"\x1b\[H\x1b\[2K|\x1b\[2J")
 
+# Sequences pyte misreads, removed before it sees them. None of them draws anything:
+#   CSI with a private marker < > =   keyboard protocols and queries. pyte ignores the marker, so
+#                                     claude's `ESC[>4m` (modifyOtherKeys) became SGR 4: every cell
+#                                     after it underlined, and the snapshot handed the browser an
+#                                     underline that ConPTY never turns off (2026-09-29). `ESC[<u`
+#                                     and `ESC[=1;1u` were printed as text.
+#   CSI with ':' sub-parameters       `ESC[4:3m` (curly underline), `ESC[38:2::r:g:bm`: pyte prints
+#                                     the part after the colon. Dropping them costs a styling detail.
+_UNSEEN = re.compile(r"\x1b\[[<>=][0-9;:]*[ -/]*[@-~]|\x1b\[[0-9;]*:[0-9;:]*[ -/]*[@-~]")
+# An escape sequence cut by a chunk boundary. Held back until the rest arrives, so the filter
+# above always sees whole sequences.
+_OPEN_TAIL = re.compile(r"\x1b(?:\[[0-?]*[ -/]*)?$")
+
+# Bumped when the model's behaviour changes in a way the web server has to know about.
+# 2: the sequences above are filtered. A daemon reporting 1 (or nothing) still carries the
+#    underline bug, and the web server strips underline from its snapshots.
+MODEL_VERSION = 2
+
 # DEC private modes a snapshot must re-establish. They change what the browser SENDS (cursor
 # keys, bracketed paste, mouse, focus), so a restored screen without them types wrong -
 # the Home/End and pasted-image-path incidents both came from a mode xterm never learned.
@@ -163,6 +181,7 @@ class Mirror:
         self.screen = MirrorScreen(cols, rows, history)
         self.stream = pyte.Stream(self.screen)
         self.pending = None
+        self._carry = ""
 
     @property
     def size(self):
@@ -181,6 +200,15 @@ class Mirror:
             self.screen.resize(r, c)
 
     def feed(self, data):
+        data = self._carry + data
+        self._carry = ""
+        t = _OPEN_TAIL.search(data)
+        if t and len(data) - t.start() < 64:
+            self._carry = data[t.start():]
+            data = data[:t.start()]
+        data = _UNSEEN.sub("", data)
+        if not data:
+            return
         if self.pending:
             m = REPAINT_MARK.search(data)
             if m:
