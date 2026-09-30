@@ -18,7 +18,10 @@ Protocol (one line = one JSON object):
         {"op":"kill","sid":..} / {"op":"rename","sid":..,"name":..}   (name = tab name)
         {"op":"label","sid":..,"label":..}                            (label = per-pane name)
         {"op":"write","sid":..,"text":..,"submit":bool}   (external callers = the wezterm cli send-text slot)
-        {"op":"backlog","sid":..}                         (= the get-text slot)
+        {"op":"backlog","sid":..}                         (raw output - replay/debugging)
+        {"op":"screen","sid":..,"history":n}              (= the get-text slot: the screen model
+                                                           as text, n rows of scrollback first;
+                                                           -1 = all. Needs model 3)
         {"op":"ping"}
     attach connection - from here on this connection is a stream for one session
         send: {"op":"attach","sid":..}
@@ -129,6 +132,19 @@ async def handle_control(w, msg):
         if not s:
             return {"ok": False, "error": "no such session"}
         return {"ok": True, "result": {"text": s.backlog()}}
+    if op == "screen":
+        # What is on the screen, read off the model - the backlog is the stream that drew it, and
+        # an app that redraws by moving the cursor (claude, and all of claude in full-screen mode)
+        # comes out of the stream as fragments: `funcion` for `function`, where the `t` was
+        # already on screen and never resent (2026-09-30).
+        s = mgr.get(msg.get("sid"))
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        if not s.model:
+            return {"ok": False, "error": "no screen model"}
+        fut = s.model.request_text(int(msg.get("history") or 0))
+        text, alt = await asyncio.wait_for(asyncio.wrap_future(fut), 10)
+        return {"ok": True, "result": {"text": text, "alt": alt, "cols": s.cols, "rows": s.rows}}
     return {"ok": False, "error": f"unknown op {op!r}"}
 
 

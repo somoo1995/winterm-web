@@ -167,8 +167,8 @@ class Hub:
                     # history is the old staircase all over again (seen right after a server
                     # restart, 2026-09-28). Keep the screen - the kick that follows the first
                     # attach repaints it anyway - and start the history clean.
-                    dropped = len(self.mirror.screen.history)
-                    self.mirror.screen.history.clear()
+                    dropped = len(self.mirror.main.history)
+                    self.mirror.main.history.clear()
                     log.info("mirror seeded sid=%s chars=%d (history from the ring buffer dropped: %d rows)",
                              self.sid, len(item[1]), dropped)
                 elif kind == "size":
@@ -294,7 +294,7 @@ class Hub:
             SIZE_FALLBACK, lambda: self._enqueue(("flush",)))
 
     def text(self):
-        return self.mirror.text() if self.mirror else ""
+        return self.mirror.text()[0] if self.mirror else ""
 
 
 _hubs = {}                    # {sid: Hub}

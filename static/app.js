@@ -123,7 +123,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 131;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 132;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -718,10 +718,37 @@
   // How: block the default touch scroll (`passive:false` + preventDefault) and drive
   // `scrollTop` ourselves; on release run a decay loop from the last velocity. xterm
   // redraws on its own from the scroll event.
-  function attachInertia(paneEl) {
+  //
+  // A full-screen app (claude with `"tui": "fullscreen"`, vim, less) lives in the alternate
+  // buffer, which has no scrollback - `scrollTop` has nowhere to go, so the finger did nothing
+  // (2026-09-30). Such an app scrolls itself on wheel input, so there the finger's travel
+  // becomes wheel events, one per row, handed to xterm: it encodes them the way the app asked
+  // (a mouse report, or arrow keys when the app did not turn the mouse on).
+  function attachInertia(paneEl, term) {
     const vp = paneEl.querySelector(".xterm-viewport");
     if (!vp || vp.dataset.inertia) return;
     vp.dataset.inertia = "1";
+    let wheelCarry = 0;
+    const scrollBy = (px, x, y) => {
+      if (term.buffer.active.type !== "alternate") { vp.scrollTop += px; return; }
+      const scr = paneEl.querySelector(".xterm-screen");
+      if (!scr) return;
+      const r = scr.getBoundingClientRect();
+      const rowH = r.height / term.rows;
+      if (!(rowH > 0)) return;
+      wheelCarry += px;
+      // at most a few rows per call: a hard fling must not bury the app in reports
+      const n = Math.max(-4, Math.min(4, Math.trunc(wheelCarry / rowH)));
+      wheelCarry = Math.max(-rowH, Math.min(rowH, wheelCarry - n * rowH));
+      // xterm reports the cell under the pointer, so keep it on the screen
+      const cx = Math.min(Math.max(x, r.left + 1), r.right - 1);
+      const cy = Math.min(Math.max(y, r.top + 1), r.bottom - 1);
+      for (let i = 0; i < Math.abs(n); i++) {
+        scr.dispatchEvent(new WheelEvent("wheel", {
+          deltaY: Math.sign(n), deltaMode: WheelEvent.DOM_DELTA_LINE,
+          clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+      }
+    };
     // `touch-action` beats `preventDefault`. The CSS used to say `pan-y`, which RESERVES
     // vertical panning for the browser: it then starts a compositor scroll, ignores our
     // preventDefault and kills the in-flight touch with `touchcancel`, so a long-press
@@ -731,14 +758,14 @@
     // set to `none` - otherwise a viewport we failed to attach to loses all scrolling.
     vp.style.touchAction = "none";
 
-    let lastY = 0, lastT = 0, vel = 0, raf = 0;
+    let lastX = 0, lastY = 0, lastT = 0, vel = 0, raf = 0;
     const stop = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
 
     vp.addEventListener("touchstart", (e) => {
       stop();
       const t = e.touches[0];
       if (!t) return;
-      lastY = t.clientY; lastT = performance.now(); vel = 0;
+      lastX = t.clientX; lastY = t.clientY; lastT = performance.now(); vel = 0; wheelCarry = 0;
     }, { passive: true });
 
     vp.addEventListener("touchmove", (e) => {
@@ -750,10 +777,10 @@
       const now = performance.now();
       const dy = lastY - t.clientY;
       const dt = Math.max(1, now - lastT);
-      vp.scrollTop += dy;
+      scrollBy(dy, t.clientX, t.clientY);
       // convert to px/frame (16ms) and blend with the previous velocity to damp spikes
       vel = vel * 0.3 + (dy / dt) * 16 * 0.7;
-      lastY = t.clientY; lastT = now;
+      lastX = t.clientX; lastY = t.clientY; lastT = now;
       e.preventDefault();          // stops the default scroll doubling our movement
     }, { passive: false });
 
@@ -761,10 +788,11 @@
       if (selecting) { vel = 0; return; }      // never add inertia to a selection gesture
       if (Math.abs(vel) < 0.6) return;
       const step = () => {
-        vp.scrollTop += vel;
+        scrollBy(vel, lastX, lastY);
         vel *= 0.94;                                   // decay factor - higher slides further
-        const atEdge = vp.scrollTop <= 0 ||
-                       vp.scrollTop >= vp.scrollHeight - vp.clientHeight - 1;
+        // the app's own scroll has no edge we can see; there only the decay stops it
+        const atEdge = term.buffer.active.type !== "alternate" &&
+                       (vp.scrollTop <= 0 || vp.scrollTop >= vp.scrollHeight - vp.clientHeight - 1);
         if (Math.abs(vel) < 0.4 || atEdge) { raf = 0; return; }
         raf = requestAnimationFrame(step);
       };
@@ -838,7 +866,7 @@
 
       list.forEach((s2, i) => {
         const p = panes.get(s2.sid);
-        if (isPhone) attachInertia(p.el);   // the viewport may not exist right after open()
+        if (isPhone) attachInertia(p.el, p.term);   // the viewport may not exist right after open()
         // named -> "1 name", otherwise just the number (::before content:attr(data-idx))
         const nm = paneLabel(p.sid);
         const idxLabel = nm ? `${i + 1} ${nm}` : String(i + 1);
@@ -999,7 +1027,7 @@
         .then(() => setTimeout(attachWebgl, 20));
     }
     applyInputMode(term);          // right at creation - must run before any focus()
-    if (isPhone) attachInertia(el);
+    if (isPhone) attachInertia(el, term);
 
     const p = { sid, el, host, term, fit, ws: null, retry: null, delay: 500, attachedAt: 0 };
     p2.ref = p;                            // lets a late attachWebgl find this pane

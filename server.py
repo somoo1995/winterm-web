@@ -965,8 +965,9 @@ async def api_send_by_name(payload: dict = Body(...)):
 
 # backlog is the RAW stream the PTY emitted, with ANSI control chars mixed in.
 # It must be stripped for a human or skill to read (wezterm cli get-text read a grid, so it was already text).
-# Limit: we hold a stream, not a grid, so a TUI that redraws by moving the cursor (claude etc.) shows
-#   "what was output over time", not "the current screen". Shell output is accurate; a TUI is approximate.
+# Limit: a stream is not a grid, so a TUI that redraws by moving the cursor (claude etc.) shows
+#   "what was output over time", not "the current screen". Capture reads the daemon's screen model
+#   (a grid) instead and keeps this only as the fallback and for raw=1.
 _ANSI = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL/ST (window title, etc.)
     r"|\x1b\[[0-?]*[ -/]*[@-~]"               # CSI (color, cursor moves)
@@ -980,21 +981,37 @@ def strip_ansi(text):
 
 
 @app.get("/api/capture")
-async def api_capture_by_name(target: str, lines: int = 0, raw: int = 0):
+async def api_capture_by_name(target: str, lines: int = 0, raw: int = 0, source: str = ""):
     """Address by name and read the screen - the wezterm cli get-text slot.
 
-    Default is ANSI-stripped plain text; raw=1 returns the original stream as-is.
+    Default is the daemon's screen model as plain text: what the screen shows now, after
+    scrollback (`lines` > 0 keeps the last that many non-blank rows). That is exact for a TUI too,
+    where the stripped stream (`source=stream`, or a daemon without the `screen` op) is only
+    "what was drawn over time". raw=1 returns the original stream as-is.
+    `source` in the reply says which one answered; `alt` is true while a full-screen app is up.
     """
     s, err = await _resolve(target)
     if err:
         return err
+    reply = {"ok": True, "sid": s["sid"], "tab": s["name"], "label": s.get("label", "")}
+    if not raw and source != "stream":
+        try:
+            # Blank rows are dropped below, so ask for more history than rows wanted.
+            r = await _ask({"op": "screen", "sid": s["sid"], "history": lines * 3 if lines > 0 else -1})
+        except RuntimeError:
+            r = None                          # a daemon before the op, or no model - the stream
+        if r is not None:
+            text = r.get("text", "")
+            if lines > 0:
+                text = "\n".join([ln for ln in text.splitlines() if ln.strip()][-lines:])
+            return {**reply, "text": text, "source": "screen", "alt": bool(r.get("alt"))}
     r = await _ask({"op": "backlog", "sid": s["sid"]})
     text = r.get("text", "")
     if not raw:
         text = strip_ansi(text)
     if lines > 0:
         text = "\n".join([ln for ln in text.splitlines() if ln.strip()][-lines:])
-    return {"ok": True, "sid": s["sid"], "tab": s["name"], "label": s.get("label", ""), "text": text}
+    return {**reply, "text": text, "source": "stream"}
 
 
 @app.get("/api/sessions/{sid}/capture")
