@@ -83,9 +83,16 @@
   // worse terminal. Windows has no such conflict and keeps Ctrl.
   const IS_MAC_UI = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
 
+  // Phone-ness is a property of the DEVICE, but the width test only sees the current screen.
+  // A foldable reloaded while unfolded measured 932px and booted the PC layout, and since this
+  // is decided once per load it stayed PC after folding back (2026-10-01). So a touch device
+  // that was ever narrow is remembered as a phone; `?kb=0|1` still overrides both ways.
   const isPhone = (() => {
     const f = /[?&]kb=([01])/.exec(location.search);
-    return f ? f[1] === "1" : (matchMedia("(pointer: coarse)").matches && innerWidth < 900);
+    if (f) return f[1] === "1";
+    if (!matchMedia("(pointer: coarse)").matches) return false;
+    if (innerWidth < 900) { localStorage.setItem("webterm.phone", "1"); return true; }
+    return localStorage.getItem("webterm.phone") === "1";
   })();
   // Is this a REMOTE browser? This is what decides where a paste comes from.
   // The PC path always reads `/api/clipboard` = the clipboard of the machine the
@@ -123,7 +130,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 132;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 135;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -149,6 +156,8 @@
   // Recomputes the usable height on phones (soft keyboard + key dock).
   // Real implementation is installed by the phone setup block.
   let applyViewport = () => {};
+  // Keeps a pane's view on its cursor while an open keyboard holds the row count (phone block).
+  let kbHoldFollow = () => {};
   // The input mode must be applied the moment a pane is created; applying it later
   // (via polling) lets a focus() on the way - a tab switch, say - pop up the Android
   // keyboard while we are still in read mode.
@@ -432,6 +441,20 @@
     if (/\b(vim|nvim|nano|code)\b/.test(t)) return "edit";
     if (/(powershell|pwsh|cmd\.exe|^ps )/.test(t)) return "shell";
     return "shell";
+  }
+
+  // Is a full-screen program (nvim, less, micro, htop) running in this pane?
+  // Such a program switches to the alternate screen and expects the whole keyboard, which a
+  // shell does not. Read straight from xterm, so it flips the moment the program starts or
+  // exits - unlike the window title, which nvim does not set by default (`title=0`) and which
+  // nothing clears after a program exits. The screen model re-enters the alternate screen on
+  // reconnect, so a reload keeps it.
+  // claude is excluded: with `"tui": "fullscreen"` it lives in the alternate screen too, and
+  // the app shortcuts must keep working there.
+  function fullscreenApp(p) {
+    if (!p || p.term.buffer.active.type !== "alternate") return false;
+    const k = kindOf(sessOf(p.sid));
+    return k !== "claude" && k !== "busy";
   }
 
   // ---------- tab bar ----------
@@ -920,6 +943,9 @@
       // zoom toggle fired together with "double tap = typing toggle". Pane zoom on a phone
       // lives in the dock's Alt layer (`zoom`), so nothing is lost.
       if (isPhone) return;
+      // A full-screen program that asked for the mouse (nvim's default `mouse=a`) gets the
+      // double click - it selects a word there. Without mouse reporting the zoom still works.
+      if (fullscreenApp(p) && term.modes.mouseTrackingMode !== "none") return;
       const ps = tabPanes(activeTab);
       const i = ps.findIndex((x) => x.sid === sid);
       if (i < 0) return;
@@ -1033,6 +1059,10 @@
     p2.ref = p;                            // lets a late attachWebgl find this pane
     if (p2.webgl) p.webgl = p2.webgl;      // move over what was parked in the box
     panes.set(sid, p);
+    if (isPhone) {
+      term.onCursorMove(() => kbHoldFollow(p));
+      term.onResize(() => kbHoldFollow(p, true));
+    }
 
     // xterm auto-answers ConPTY's DA query and the reply echoes into the shell prompt as
     // `[?1;2c`. Drop those auto-replies, but only right after attaching.
@@ -1136,7 +1166,7 @@
         wsend(p, { t: "i", d: "\n" });
         return false;                      // keep xterm from appending the submit (CR)
       }
-      return !isAppKey(e);
+      return !isAppKey(e) || yieldsToApp(e, p);
     });
     connect(p);
     return p;
@@ -1509,10 +1539,10 @@
     if (composing) return;
     if (reportSize) {
       if (!fontsReady) return;       // measured with the wrong font = a resize for nothing
-      // An open keyboard no longer blocks this. Bailing out on `kbOpen` left the screen
-      // covered and the prompt invisible. The phone block now shrinks the body height when
-      // the keyboard opens, so the fit result IS the visible area and demanding that size
-      // is correct.
+      // An open keyboard does not block this. Bailing out on `kbOpen` left the screen
+      // covered and the prompt invisible. While the keyboard is up the phone block holds
+      // each host at its current row count (see "Keyboard hold"), so the fit proposes the
+      // same rows and nothing is sent - only a width change goes through.
       // MEASURE only - `proposeDimensions` does not touch xterm. The resize itself happens in
       // `applySize` when the server answers (see there for why).
       const d = p.fit.proposeDimensions();
@@ -2245,6 +2275,19 @@
 
   const isAppKey = (e) => keymap.has(chordOf(e));
 
+  // Ctrl+letter (and Ctrl+[ ] \) is a control character the terminal can send, and a
+  // full-screen program gives it meanings the shell never did: in nvim Ctrl+] jumps to the
+  // definition, Ctrl+N/P complete, Ctrl+T jumps back, Ctrl+H moves to the left window. While
+  // such a program runs (`fullscreenApp`), those chords go to it instead of the app.
+  // The rest of the keymap stays with the app - the Alt layer, Ctrl+digits, Ctrl+arrows,
+  // the font keys - so tab and pane switching still work from inside nvim. Ctrl+V stays
+  // paste (handled before this; vim's block select is also on Ctrl+Q).
+  // macOS needs none of it: the app modifier there is Cmd, and real Ctrl already reaches the
+  // terminal.
+  const CTRL_CHAR_CHORD = /^Ctrl\+(?:[a-z]|\[|\]|\\)$/;
+  const yieldsToApp = (e, p) =>
+    !IS_MAC_UI && CTRL_CHAR_CHORD.test(chordOf(e)) && fullscreenApp(p);
+
   // Notes: Ctrl+W (delete word) and Ctrl+R (reverse search) are deliberately left unbound
   // because PSReadLine really uses them (per Get-PSReadLineKeyHandler -Bound, unlike
   // Ctrl+P / Ctrl+N / Ctrl+T / Ctrl+O).
@@ -2267,6 +2310,9 @@
     if (modalOpen()) return;
     const hit = keymap.get(chordOf(e));
     if (!hit) return;
+    // a full-screen program in the focused pane owns this chord - xterm sends it on
+    const fp = panes.get(activeSid);
+    if (fp && fp.el.contains(e.target) && yieldsToApp(e, fp)) return;
     e.preventDefault();
     try {
       ACTIONS[hit.id].run(hit.arg);
@@ -3242,11 +3288,56 @@
     // so changing the height from outside without telling it goes wrong, and telling it
     // makes it exact. Height change and `resizeAll()` (fit -> report to the PTY) are
     // therefore one unit.
-    // The cost is that opening and closing the keyboard resizes the PTY and makes TUIs such
-    // as claude redraw - deliberately preferred over looking at a covered screen.
     {
       const vv = window.visualViewport;
       let vvTimer = 0;
+
+      // Keyboard hold. Fitting the terminal to the space above the keyboard flipped the PTY
+      // between 28 and 14 rows on every open/close, and each flip made claude redraw its live
+      // region and leave a copy of it in the scrollback (27 flips on 2026-10-01). Now the
+      // row count stays: each host keeps the height of its current rows and slides up inside
+      // the shrunken pane - bottom-anchored (claude's input box and statusline), but never
+      // past the cursor (a shell prompt near the top of a fresh screen). The fit measures the
+      // host, so it proposes the same rows and nothing is reported. xterm and the PTY keep
+      // the same cell count throughout; only CSS hides the top.
+      let held = false;
+      const cellH = (p) => {
+        const d = p.term._core && p.term._core._renderService.dimensions;
+        return d ? d.css.cell.height : 0;
+      };
+      const hold = (p) => {
+        const ch = cellH(p);
+        if (!ch) return;
+        const cs = getComputedStyle(p.term.element);
+        const padV = (parseInt(cs.paddingTop) || 0) + (parseInt(cs.paddingBottom) || 0);
+        // half a row of slack: fit floors height / cell height, so this lands on `rows` exactly
+        p.host.style.height = Math.floor((p.term.rows + 0.5) * ch) + padV + "px";
+      };
+      const slide = (p) => {
+        const ch = cellH(p);
+        if (!ch) return;
+        // align the last ROW (not the host, which carries the half-row slack) with the pane bottom
+        const padT = parseInt(getComputedStyle(p.term.element).paddingTop) || 0;
+        let y = Math.max(0, padT + p.term.rows * ch - p.el.clientHeight);
+        y = Math.min(y, Math.max(0, (p.term.buffer.active.cursorY - 1) * ch));
+        const tf = y ? `translateY(${-Math.round(y)}px)` : "";
+        if (p.host.style.transform !== tf) p.host.style.transform = tf;
+      };
+      const release = (p) => { p.host.style.height = ""; p.host.style.transform = ""; };
+      kbHoldFollow = (p, resized) => {
+        if (!held) return;
+        // Another device resized the PTY (or a new pane got its first size): hold the NEW
+        // row count, or the fit would keep proposing the old one and report it back.
+        if (resized) hold(p);
+        // One slide per frame: claude moves the cursor up and back while redrawing, and only
+        // where it rests matters. Not mid IME composition - moving the textarea drops it.
+        if (p.slideRaf) return;
+        p.slideRaf = requestAnimationFrame(() => {
+          p.slideRaf = 0;
+          if (held && !composing) slide(p);
+        });
+      };
+
       applyViewport = () => {
         // Keyboard height = layout viewport minus visual viewport.
         // Using "the largest `vv.height` seen without a keyboard" as the baseline collapses
@@ -3260,6 +3351,8 @@
         const changed = open !== kbOpen;
         kbOpen = open;
         document.body.classList.toggle("kb-open", kbOpen);
+        if (changed && open) { panes.forEach(hold); held = true; }
+        if (changed && !open && held) { held = false; panes.forEach(release); }
 
         // A closed keyboard means typing mode is off. Dismissing it with the Android back
         // button fires no event, so the app kept believing typing=true and that stale state
@@ -3286,6 +3379,7 @@
         const dockH = (pad.hidden ? 0 : pad.offsetHeight) + (spad.hidden ? 0 : spad.offsetHeight);
         const usable = Math.max(120, vh - dockH);        // floor - a height of 0 breaks xterm
         document.body.style.height = (kbOpen || dockH) ? usable + "px" : "";
+        if (held) panes.forEach(slide);                  // the pane just shrank (or grew back)
 
         clearTimeout(vvTimer);
         vvTimer = setTimeout(() => {
