@@ -313,7 +313,15 @@ Sessions can be driven from scripts. A tab is a session `name`, and **sessions s
 | Resolve a target | `GET /api/resolve?target=3-2` |
 | Rename | `POST /api/tabs/{name}/rename` · `POST /api/panes/label` |
 | Close | `DELETE /api/sessions/{sid}` · `DELETE /api/tabs/{name}` |
+| Offer a file to remote browsers (PC → phone) | `POST /api/offer` `{path, name?, target?}` · `GET /api/offers` · `DELETE /api/offers/{id}` |
 | Terminal stream | `WebSocket /ws/{sid}` |
+
+`/api/offer` takes an **absolute** path and pushes a download card to every remote browser
+(a browser on the server's own machine ignores it). Only offered files are downloadable, via an
+unguessable token URL; cards are re-sent on reconnect until dismissed, and expire after 24h.
+Dismissing only hides the card: the file box (tab-bar button, on the PC as well) lists every
+open offer and can open, download again or withdraw it. Offers survive a web-server restart
+(`offers.json`, not committed).
 
 `target` syntax: `3-2` (2nd pane of tab 3) · `tab:pane` · `tab:2` · sid prefix.
 **Partial matching is disabled on purpose** — a command once went to the wrong session.

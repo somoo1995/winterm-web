@@ -14,12 +14,13 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -398,6 +399,202 @@ async def api_upload(files: list[UploadFile] = File(...)):
         return UTF8JSONResponse({"ok": False, "error": "no files saved", "errors": errors},
                                 status_code=400)
     return {"ok": True, "files": saved, "errors": errors}
+
+
+# -- File offer (PC -> phone) --------------------------------
+# The reverse of /api/upload. Someone on the PC side - in practice claude, asked from the phone
+# "send me that file" - OFFERS a file by path. The server pushes a card to every attached browser
+# and the phone taps it to download.
+#
+# Why an offer and not a plain `GET /api/download?path=...`:
+#   - Only what was explicitly offered can be fetched. A path parameter would turn every file on
+#     the PC into a URL, for anyone who can reach the port.
+#   - The URL carries an unguessable token, so it is safe to print in a terminal or a chat.
+#   - The card has to reach the phone somehow anyway. A link printed into the terminal is not
+#     tappable there (touch is taken by scroll and long-press selection), and a phone that was
+#     asleep when the offer was made would never see it. Offers are kept and re-sent on attach.
+#
+# The file is NOT copied - the download serves whatever is at the path at that moment.
+#
+# Offers are written to disk: the web server restarts far more often than a day passes (every
+# server-side change), and losing every open card on each restart made the phone's file box
+# empty for no reason the user could see. Only the server writes this file.
+OFFER_TTL = 86400                   # same lifetime as uploads
+OFFERS_PATH = os.path.join(config.BASE, "offers.json")   # .gitignored - it holds local paths
+
+
+def _offers_load():
+    try:
+        with open(OFFERS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    cutoff = time.time() - OFFER_TTL
+    return {o["id"]: o for o in data if isinstance(o, dict) and o.get("id") and o.get("path")
+            and o.get("created", 0) >= cutoff}
+
+
+def _offers_save():
+    # Atomic, like config.json: a half-written file would silently empty the box on next start.
+    tmp = OFFERS_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(list(_offers.values()), fh, ensure_ascii=False)
+        os.replace(tmp, OFFERS_PATH)
+    except OSError as e:
+        log.info("offers.json write failed: %s", e)
+
+
+_offers = _offers_load()            # {id: {id, path, name, size, created, from, got}}
+
+# Shown inline by "open" instead of downloaded. Text goes out as UTF-8 plain text: a phone has
+# no app for .md or .log, but the browser can show it.
+_INLINE_TEXT = {".txt", ".md", ".log", ".csv", ".json", ".xml", ".yaml", ".yml", ".ini",
+                ".sql", ".py", ".js", ".ts", ".java", ".ps1", ".sh", ".lua", ".html", ".css"}
+
+
+def _offer_public(o):
+    # `got` = when it was last downloaded, by any browser - the file box shows it, so a file
+    # fetched on the work PC reads as fetched on the phone too.
+    return {"id": o["id"], "name": o["name"], "size": o["size"], "created": o["created"],
+            "from": o["from"], "got": o.get("got"), "url": f"/api/offer/{o['id']}"}
+
+
+def _live_offers():
+    """Offers still worth showing: not expired, and the file is still there."""
+    cutoff = time.time() - OFFER_TTL
+    expired = [k for k, o in _offers.items() if o["created"] < cutoff]
+    for k in expired:
+        _offers.pop(k, None)
+    if expired:
+        _offers_save()
+    return [o for o in _offers.values() if os.path.isfile(o["path"])]
+
+
+def _browser_sockets():
+    seen, out = set(), []
+    for ws_set in list(_ws_by_sid.values()):
+        for w in list(ws_set):
+            if id(w) not in seen:
+                seen.add(id(w))
+                out.append(w)
+    return out
+
+
+async def _broadcast_offer_frame(msg):
+    """Push one control frame to every attached browser; returns the sockets it went to."""
+    frame = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+    socks = _browser_sockets()
+    for w in socks:
+        try:
+            await w.send_bytes(frame)
+        except Exception:
+            pass                    # a dying socket is cleaned up by its own handler
+    return socks
+
+
+async def _send_offers(ws):
+    """On attach: re-send what is on offer. The browser drops the ones it has already handled,
+    so a phone that was asleep when the offer was made still gets the card.
+
+    Sent even when the list is empty: it is the browser's full picture (the file-box badge), and
+    an offer that expired or was withdrawn while it was away has to disappear from it."""
+    live = _live_offers()
+    try:
+        await ws.send_bytes(json.dumps({"t": "offers", "list": [_offer_public(o) for o in live]},
+                                       ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        pass                        # a dying socket is cleaned up by its own handler
+
+
+@app.post("/api/offer")
+async def api_offer(payload: dict = Body(...)):
+    """Offer a PC file for download: `{path, name?, target?}` -> `{id, url, browsers, remote}`.
+
+    `target` is only a label ("from KIMS:1") - every attached browser gets the card, because the
+    phone may be looking at another tab. Browsers on the same machine as the server ignore it
+    (the file is already on that disk). `remote` = how many remote browsers are attached right
+    now; 0 is not a failure, the card shows when the phone next connects.
+    """
+    try:
+        path = _as_text(payload.get("path", "")).strip().strip('"')
+    except ValueError as e:
+        return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    path = os.path.expandvars(os.path.expanduser(path))
+    if not path or not os.path.isabs(path):
+        # Relative to what? This server's cwd means nothing to the caller, and a pane's spawn cwd
+        # is not where its shell is now.
+        return UTF8JSONResponse({"ok": False, "error": "an absolute path is required"}, status_code=400)
+    if os.path.isdir(path):
+        return UTF8JSONResponse({"ok": False, "error": "that is a folder - zip it first and offer the zip"},
+                                status_code=400)
+    if not os.path.isfile(path):
+        return UTF8JSONResponse({"ok": False, "error": f"no such file: {path}"}, status_code=404)
+
+    src = None
+    if payload.get("target"):
+        r = await _ask({"op": "list"})
+        s, _ = _match(r.get("sessions", []), str(payload["target"]))
+        if s:
+            src = f"{s['name']}:{s['label']}" if s.get("label") else s["name"]
+
+    # The header encoding of the name is starlette's job (RFC 5987); only strip what can't be a name
+    name = os.path.basename(_as_text(payload.get("name") or "") or path)
+    name = re.sub(r'[\x00-\x1f/\\]', "_", name) or "file"
+    o = {"id": secrets.token_urlsafe(12), "path": os.path.abspath(path), "name": name,
+         "size": os.path.getsize(path), "created": time.time(), "from": src}
+    _offers[o["id"]] = o
+    _offers_save()
+
+    socks = await _broadcast_offer_frame({"t": "offer", "offer": _offer_public(o)})
+    browsers = {w.query_params.get("cid") or id(w) for w in socks}
+    remote = {w.query_params.get("cid") or id(w) for w in socks if w.query_params.get("remote") == "1"}
+    log.info("offer %s %s (%d bytes) from=%s -> browsers=%d remote=%d",
+             o["id"], o["path"], o["size"], src or "-", len(browsers), len(remote))
+    return {"ok": True, **_offer_public(o), "browsers": len(browsers), "remote": len(remote)}
+
+
+@app.get("/api/offers")
+async def api_offers():
+    """The file box. Newest first, with the PC path - whoever can reach this port already has a
+    shell on the PC, so the path tells them nothing new, and it answers "which file was this"."""
+    live = sorted(_live_offers(), key=lambda o: o["created"], reverse=True)
+    return {"ok": True, "offers": [{**_offer_public(o), "path": o["path"]} for o in live]}
+
+
+@app.delete("/api/offers/{oid}")
+async def api_offer_withdraw(oid: str):
+    """Withdraw an offer. The link dies, and every attached browser drops its card and file-box
+    row; the file on the PC is untouched."""
+    gone = _offers.pop(oid, None) is not None
+    if gone:
+        _offers_save()
+        await _broadcast_offer_frame({"t": "offer-gone", "id": oid})
+    return {"ok": gone}
+
+
+# HEAD too: the browser checks the link before starting a download, so an expired offer says so
+# instead of saving a JSON error page under the file's name.
+@app.api_route("/api/offer/{oid}", methods=["GET", "HEAD"])
+async def api_offer_get(oid: str, request: Request, inline: int = 0):
+    o = _offers.get(oid)
+    if not o or o["created"] < time.time() - OFFER_TTL or not os.path.isfile(o["path"]):
+        return UTF8JSONResponse({"ok": False, "error": "this offer is gone (expired, withdrawn or the file moved)"},
+                                status_code=404)
+    # Only a real download counts as "got": HEAD is the pre-check and `inline` is just a look.
+    if request.method == "GET" and not inline:
+        o["got"] = time.time()
+        _offers_save()
+    ext = os.path.splitext(o["name"])[1].lower()
+    if inline and ext in _INLINE_TEXT:
+        mt = "text/plain; charset=utf-8"
+    else:
+        # starlette falls back to text/plain for unknown types, which a browser may render instead
+        # of saving - octet-stream makes "download" mean download.
+        mt = mimetypes.guess_type(o["name"])[0] or "application/octet-stream"
+    return FileResponse(o["path"], filename=o["name"], media_type=mt,
+                        content_disposition_type="inline" if inline else "attachment",
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/diag")
@@ -1235,6 +1432,7 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
     # makes claude redraw its live region, and when that region is taller than the screen (a
     # phone, 28 rows or 14 with the keyboard up) every redraw leaves a copy in the scrollback.
     await ws.send_bytes(json.dumps({"t": "synced", "model": True}).encode("utf-8"))
+    await _send_offers(ws)
 
     async def pump_out():
         """hub -> browser"""
@@ -1346,6 +1544,7 @@ async def _ws_term_replay(ws: WebSocket, sid: str):
         _applied_size[sid] = cur          # the daemon's size IS the applied size after a server restart
     if cur:
         await _push_size(sid, cur[0], cur[1], only=ws, initial=True)
+    await _send_offers(ws)
 
     # A RE-attach replays whatever the ring buffer holds, which starts mid-stream and, for a
     # TUI, is a diff against a screen this browser never had. The browser asks for a repaint

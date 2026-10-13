@@ -614,7 +614,7 @@ body.phone #scrollpad button:active{ background:var(--tab-hover-bg) }
 }
 #settings-open:hover{color:var(--fg); background:var(--tab-hover-bg)}
 
-#settings{
+#settings, #offerbox{
   position:fixed; inset:0; z-index:60; display:flex;
   align-items:flex-start; justify-content:center; padding-top:8vh;
   background:rgba(10,11,18,.55); backdrop-filter:blur(2px);
@@ -717,7 +717,7 @@ body.phone #scrollpad button:active{ background:var(--tab-hover-bg) }
 
 /* On a phone the panel is the whole screen - 40 rows need the height, and a centred dialog
    would sit under the soft keyboard the moment a field is focused. */
-body.phone #settings{padding-top:0}
+body.phone #settings, body.phone #offerbox{padding-top:0}
 body.phone .st-panel{width:100vw; max-height:100vh; height:100vh; border-radius:0; border:0}
 body.phone .st-chord{min-width:108px}
 body.phone .st-warn{padding-left:0}
@@ -746,6 +746,79 @@ body.phone .st-warn{padding-left:0}
 #stale-x{border:0; color:#ffd9a0; padding:5px 7px}
 /* The banner covers the tab bar, so push everything down while it is up. */
 body.has-stale #tabbar{margin-top:38px}
+
+/* ===== file offers (PC -> phone) ===== */
+/* Under the tab bar, above the panes. Cards stay until acted on - the phone may have been in a
+   pocket when the file was offered. */
+#offers{
+  position:fixed; z-index:75; right:8px; left:auto; width:min(420px, calc(100vw - 16px));
+  top:calc(var(--tabbar-h) + env(safe-area-inset-top, 0px) + 6px);
+  display:flex; flex-direction:column; gap:6px;
+}
+body.has-stale #offers{top:calc(var(--tabbar-h) + env(safe-area-inset-top, 0px) + 44px)}
+body.phone #offers{top:calc(46px + env(safe-area-inset-top, 0px) + 6px)}        /* phone tab bar is 46px */
+body.phone.has-stale #offers{top:calc(46px + env(safe-area-inset-top, 0px) + 44px)}
+.offer{
+  display:flex; align-items:center; gap:8px; padding:9px 10px;
+  background:#1f2335; border:1px solid var(--tab-on-bg); border-radius:10px;
+  box-shadow:0 4px 14px rgba(0,0,0,.45); font-size:12.5px;
+}
+.offer .of-info{flex:1; min-width:0}
+.offer .of-name{color:var(--fg); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.offer .of-meta{color:var(--dim); font-size:11px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.offer button{
+  flex:none; padding:7px 11px; border:1px solid var(--tab-on-bg); border-radius:8px;
+  background:transparent; color:var(--tab-on-bg); font:inherit; font-size:12.5px; cursor:pointer;
+}
+.offer button.of-get{background:var(--tab-on-bg); color:var(--tab-on-fg); font-weight:700}
+.offer button.of-x{border:0; color:var(--dim); padding:7px 6px}
+
+/* ===== file box (every offer, dismissed ones included) ===== */
+#offerbox-open{
+  position:relative; display:flex; align-items:center;
+  background:transparent; border:0; color:var(--dim); cursor:pointer;
+  line-height:1; padding:4px 6px; border-radius:6px;
+}
+#offerbox-open:hover{color:var(--fg); background:var(--tab-hover-bg)}
+#offerbox-open.has-new{color:var(--orange)}
+#offerbox-badge{
+  position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+  border-radius:7px; background:var(--orange); color:var(--bg);
+  font-size:9.5px; font-weight:700; line-height:14px; text-align:center;
+}
+/* Above the cards (z 75): with the box open, the same file must not show twice. */
+#offerbox{z-index:77}
+#offerbox .st-panel{width:min(560px, 94vw)}
+#offerbox .st-panel:focus{outline:none}   /* focused only to pull the keys off the terminal */
+.ob-row{
+  display:flex; align-items:center; gap:8px;
+  padding:10px 2px; border-bottom:1px solid var(--line); font-size:12.5px;
+}
+.ob-row:last-child{border-bottom:0}
+.ob-info{flex:1; min-width:0}
+.ob-name{color:var(--fg); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* Not handled on this browser yet - the ones the badge counts */
+.ob-row.new .ob-name::before{content:"\25CF  "; color:var(--orange)}
+.ob-meta{color:var(--dim); font-size:11px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.ob-meta .got{color:var(--green)}
+/* rtl box + ltr <bdi> = the ellipsis lands at the start of the path, not the end */
+.ob-path{color:var(--dim); opacity:.7; font-size:10.5px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left}
+.ob-row button{
+  flex:none; padding:7px 11px; border:1px solid var(--tab-on-bg); border-radius:8px;
+  background:transparent; color:var(--tab-on-bg); font:inherit; font-size:12px; cursor:pointer;
+}
+.ob-row button.ob-get{background:var(--tab-on-bg); color:var(--tab-on-fg); font-weight:700}
+.ob-row button.ob-del{border-color:transparent; color:var(--dim); padding:7px 6px}
+.ob-row button.ob-del:hover{color:var(--red)}
+.ob-row button:disabled{opacity:.5; cursor:default}
+.ob-empty{color:var(--dim); text-align:center; padding:32px 12px; font-size:12px; line-height:1.8; white-space:pre-line}
+.ob-foot{padding:9px 14px; border-top:1px solid var(--line); font-size:10.5px; color:var(--dim); line-height:1.5}
+/* Phone: the buttons drop to their own line so the name and "downloaded" get the full width -
+   beside three buttons a Korean file name kept about ten characters. */
+body.phone .ob-row{flex-wrap:wrap; row-gap:8px}
+body.phone .ob-info{flex:1 1 100%}
+body.phone .ob-row .ob-view{margin-left:auto}
+body.phone .ob-row button{padding:8px 14px}
 
 /* IME event counter (`?ime=1`). Diagnostic only - a phone has no console, so the tally goes
    on screen where whoever is holding it can read it. */

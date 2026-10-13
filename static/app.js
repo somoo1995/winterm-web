@@ -130,7 +130,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 135;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 138;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -1193,7 +1193,8 @@
     // Ownership must not be tied to the socket: a phone reconnects whenever the screen
     // turns off or the app is switched (that is the detach/attach churn in the log), and
     // losing ownership each time would snap the size back to the PC's.
-    const ws = new WebSocket(`${proto}://${location.host}/ws/${p.sid}?cid=${encodeURIComponent(CID)}`);
+    // `remote` lets the server tell an offering caller whether a phone is there to get the card.
+    const ws = new WebSocket(`${proto}://${location.host}/ws/${p.sid}?cid=${encodeURIComponent(CID)}&remote=${isRemote ? 1 : 0}`);
     // Text frames are terminal output, verbatim. Control messages from the server (the PTY
     // size) come as BINARY frames so they can never be confused with something a shell printed.
     ws.binaryType = "arraybuffer";
@@ -1224,6 +1225,10 @@
         let m = null;
         try { m = JSON.parse(new TextDecoder().decode(ev.data)); } catch (_) { return; }
         if (m && m.t === "size" && m.c > 0 && m.r > 0) applySize(p, m.c, m.r, !!m.initial);
+        // A file the PC offered for download (server `api_offer`) - on attach, all that are open
+        if (m && m.t === "offer") showOffers([m.offer], false);
+        if (m && m.t === "offers") showOffers(m.list, true);
+        if (m && m.t === "offer-gone") dropOffer(m.id);
         // The backlog replay is over (server-side fact, see `mark_synced`). Release the
         // bottom pin now instead of guessing from silence; the kick's repaint that follows
         // must not count as replay.
@@ -1371,6 +1376,208 @@
         diag({ ev: "upload-fail", n: files.length, bytes: total, err: String(e && e.message || e) });
       });
   };
+
+  // File offers (PC -> phone) - the reverse of upload. Something on the PC (claude, asked
+  // "send me that file") calls POST /api/offer with a path; every attached browser gets a card
+  // and a tap downloads it through a token URL.
+  //   - Browsers on the server's own machine ignore offers: the file is already on that disk,
+  //     and a card popping up on the PC every time the phone asks for something is noise.
+  //   - The server re-sends open offers on every attach (a phone asleep at offer time must still
+  //     see it), so what was handled is remembered here and skipped. A card the user has not
+  //     acted on keeps coming back until they do - getting it or dismissing it.
+  const OFFERS_SEEN = "webterm.offersSeen";
+  const offersSeen = (() => {
+    try { return new Set(JSON.parse(localStorage.getItem(OFFERS_SEEN) || "[]")); } catch (_) { return new Set(); }
+  })();
+  const markOfferSeen = (id) => {
+    offersSeen.add(id);
+    try { localStorage.setItem(OFFERS_SEEN, JSON.stringify([...offersSeen].slice(-100))); } catch (_) {}
+    updateOfferBadge();
+  };
+  const fmtBytes = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + "MB"
+                        : n >= 1024 ? Math.round(n / 1024) + "KB" : n + "B";
+  const mkEl = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  // Every live offer this browser has heard of, kept from the attach frames (each is the server's
+  // full list) and the single-offer pushes. Only the badge uses it; the file box reads the server
+  // list fresh, since that one carries the PC path and who already downloaded what.
+  const offerLive = new Map();
+
+  // The badge counts what would still show as a card here - on the PC, where cards never show,
+  // nothing is "new" (the file is already on that disk).
+  function updateOfferBadge() {
+    const n = isRemote ? [...offerLive.keys()].filter((id) => !offersSeen.has(id)).length : 0;
+    const b = $("#offerbox-badge");
+    b.textContent = n > 9 ? "9+" : String(n);
+    b.hidden = !n;
+    $("#offerbox-open").classList.toggle("has-new", n > 0);
+  }
+
+  // Check the link first: an expired offer answers with a JSON error, and handing that to the
+  // download would save it under the file's name. Shared by the card and the file box.
+  const offerAlive = (o) => fetch(o.url, { method: "HEAD" }).then((r) => r.ok).catch(() => false);
+  async function offerDownload(o) {
+    if (!(await offerAlive(o))) { flash(tr("offer.gone")); dropOffer(o.id); return false; }
+    const a = document.createElement("a");
+    a.href = o.url;
+    a.download = o.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    markOfferSeen(o.id);
+    removeOfferCard(o.id);
+    return true;
+  }
+  async function offerView(o) {
+    if (!(await offerAlive(o))) { flash(tr("offer.gone")); dropOffer(o.id); return; }
+    window.open(o.url + "?inline=1", "_blank");
+  }
+
+  function removeOfferCard(id) {
+    const box = $("#offers");
+    for (const el of [...box.children]) if (el.dataset.id === id) el.remove();
+    box.hidden = !box.children.length;
+  }
+
+  // Gone for good - withdrawn (server `offer-gone`, possibly from another device), expired or the
+  // file moved. Unlike a dismissal this also leaves the file box.
+  function dropOffer(id) {
+    offerLive.delete(id);
+    removeOfferCard(id);
+    for (const el of [...$("#ob-list").children]) if (el.dataset.id === id) el.remove();
+    if (!$("#ob-list").children.length && !$("#offerbox").hidden) obRender([]);
+    updateOfferBadge();
+  }
+
+  // `full` = this list is the server's whole picture (the attach frame), not one new offer.
+  function showOffers(list, full) {
+    if (full) offerLive.clear();
+    for (const o of list || []) if (o && o.id) offerLive.set(o.id, o);
+    updateOfferBadge();
+    if (!full) obRefresh();          // a new file while the box is open belongs in it
+    if (!isRemote) return;
+    const box = $("#offers");
+    for (const o of list || []) {
+      if (!o || !o.id || offersSeen.has(o.id)) continue;
+      if ([...box.children].some((el) => el.dataset.id === o.id)) continue;   // one socket per pane
+      const row = mkEl("div", "offer");
+      row.dataset.id = o.id;
+      const info = mkEl("div", "of-info");
+      info.append(mkEl("div", "of-name", o.name),
+                  mkEl("div", "of-meta", fmtBytes(o.size || 0) + (o.from ? "  ·  " + tr("offer.from", { from: o.from }) : "")));
+      const view = mkEl("button", "of-view", tr("offer.view"));
+      const get = mkEl("button", "of-get", tr("offer.get"));
+      const x = mkEl("button", "of-x", "✕");
+      x.setAttribute("aria-label", tr("chrome.dismiss"));
+      get.onclick = () => offerDownload(o);
+      // Opened in a new tab and the card stays: after looking, you may still want the file.
+      view.onclick = () => offerView(o);
+      // Dismissing only hides the card. Say where it went - before the file box, a dismissed card
+      // was simply lost, and that is what people still expect.
+      x.onclick = () => {
+        markOfferSeen(o.id);
+        removeOfferCard(o.id);
+        flash(tr("offer.dismissed"));
+      };
+      row.append(info, view, get, x);
+      box.appendChild(row);
+    }
+    box.hidden = !box.children.length;
+  }
+
+  // ---------- file box ----------
+  // Every live offer, newest first, whatever this browser did with its card: the way back to a
+  // file after `✕`, after a download that went wrong, or for a file sent while you looked at the
+  // PC. Works on the PC too (no cards there), where withdrawing is the useful part.
+  const obAgo = (t) => {
+    const s = Math.max(0, Date.now() / 1000 - t);
+    if (s < 60) return tr("ob.ago.now");
+    if (s < 3600) return tr("ob.ago.min", { n: Math.floor(s / 60) });
+    return tr("ob.ago.hour", { n: Math.floor(s / 3600) });
+  };
+
+  function obRow(o) {
+    const row = mkEl("div", "ob-row");
+    row.dataset.id = o.id;
+    if (isRemote && !offersSeen.has(o.id)) row.classList.add("new");
+    const info = mkEl("div", "ob-info");
+    const name = mkEl("div", "ob-name", o.name);
+    name.title = o.name;
+    const meta = mkEl("div", "ob-meta");
+    meta.append([fmtBytes(o.size || 0), obAgo(o.created), o.from && tr("offer.from", { from: o.from })]
+      .filter(Boolean).join("  ·  "));
+    if (o.got) meta.append("  ·  ", mkEl("span", "got", tr("ob.got", { when: obAgo(o.got) })));
+    // The folder only (the name is right above), clipped from the START: the drive and the user
+    // folder are the same on every row, the last folders are what tell two files apart.
+    const path = mkEl("div", "ob-path");
+    const dir = mkEl("bdi", null, (o.path || "").replace(/[\\/][^\\/]*$/, ""));
+    dir.dir = "ltr";
+    path.appendChild(dir);
+    path.title = o.path || "";
+    info.append(name, meta, path);
+    const view = mkEl("button", "ob-view", tr("offer.view"));
+    const get = mkEl("button", "ob-get", tr("offer.get"));
+    const del = mkEl("button", "ob-del", tr("ob.withdraw"));
+    del.title = tr("ob.withdrawTip");
+    view.onclick = () => offerView(o);
+    get.onclick = async () => {
+      // Show "downloaded" at once - the server stamped it when the request arrived.
+      if (await offerDownload(o)) row.replaceWith(obRow({ ...o, got: Date.now() / 1000 }));
+    };
+    del.onclick = async () => {
+      del.disabled = true;
+      const r = await fetch(`/api/offers/${encodeURIComponent(o.id)}`, { method: "DELETE" })
+        .then((x) => x.json()).catch(() => null);
+      if (!r) { del.disabled = false; flash(tr("ob.loadFailed")); return; }
+      dropOffer(o.id);               // also when it was already gone (`ok: false`)
+    };
+    row.append(info, view, get, del);
+    return row;
+  }
+
+  function obRender(list) {
+    const box = $("#ob-list");
+    box.textContent = "";
+    if (!list.length) { box.appendChild(mkEl("div", "ob-empty", tr("ob.empty"))); return; }
+    for (const o of list) box.appendChild(obRow(o));
+  }
+
+  function obRefresh() {
+    if ($("#offerbox").hidden) return Promise.resolve();
+    return fetch("/api/offers").then((r) => r.json()).then((j) => {
+      if (!j || !j.ok) throw new Error("bad answer");
+      obRender(j.offers || []);
+    });
+  }
+
+  function obOpen() {
+    $("#ob-list").textContent = "";
+    $("#offerbox").hidden = false;
+    // Take the focus off the terminal, or keys typed now land in the shell behind the panel.
+    $("#offerbox .st-panel").focus();
+    obRefresh().catch(() => {
+      $("#ob-list").appendChild(mkEl("div", "ob-empty", tr("ob.loadFailed")));
+    });
+  }
+
+  function obClose() {
+    $("#offerbox").hidden = true;
+    focusPane(activeSid);
+  }
+
+  $("#offerbox-open").onclick = obOpen;
+  $("#ob-close").onclick = obClose;
+  $("#offerbox").onmousedown = (e) => { if (e.target.id === "offerbox") obClose(); };
+  // Like the settings panel: its keys must not reach the terminal or the app shortcut layer.
+  $("#offerbox").addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") obClose();
+  }, true);
 
   // Selection -> clipboard, and never fail silently.
   // `navigator.clipboard` exists only in a secure context: over https (tailscale serve) or
@@ -2304,7 +2511,7 @@
   // on window in the capture phase, and this one is registered first, so it has already run by the
   // time the recorder sees the event. Stopping propagation afterwards is too late.
   const modalOpen = () =>
-    !!document.getElementById("ask") || !$("#settings").hidden;
+    !!document.getElementById("ask") || !$("#settings").hidden || !$("#offerbox").hidden;
 
   addEventListener("keydown", (e) => {
     if (modalOpen()) return;
