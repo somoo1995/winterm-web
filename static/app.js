@@ -187,29 +187,22 @@
   //
   // So it counts them and puts the number on the screen. Whoever is holding the phone reads it.
   // ibus(리눅스 한글 입력기) + Chrome 에서 음절이 두 번 들어가는 문제 (2026-10-15, 젠북 Ubuntu 실측).
-  // ibus 는 음절을 확정할 때 compositionend(data="") 를 먼저 보내고, 확정된 글자를 별도의
-  // input(inputType="insertText") 이벤트로 넘긴다(Windows IME·Android 는 compositionend 에 글자가 실려 온다).
-  // xterm 은 그 insertText 를 "키 없이 들어온 텍스트"로 보고 바로 보내는데(_inputEvent, 직전에 keyup 이
-  // 먼저 도착한 경우만), compositionend 쪽 타이머도 textarea 차이로 같은 음절을 또 보낸다 → 손을 빨리
-  // 뗀 음절만 두 번 찍힌다. compositionend("") 직후의 insertText 는 xterm 에 안 보이게 막아 타이머 한 경로만 남긴다.
-  const IBUS_COMMIT_FIX = !isPhone && /Linux/.test(navigator.platform) && !/Android/.test(navigator.userAgent);
-  let ibusCommitPending = false;
-  let ibusCommitTimer = null;
-  if (IBUS_COMMIT_FIX) {
-    const isTa = (t) => !!(t && t.classList && t.classList.contains("xterm-helper-textarea"));
-    document.addEventListener("compositionend", (e) => {
-      if (!isTa(e.target) || e.data !== "") return;
-      ibusCommitPending = true;
-      clearTimeout(ibusCommitTimer);
-      ibusCommitTimer = setTimeout(() => { ibusCommitPending = false; }, 300);
-    }, true);
-    document.addEventListener("keydown", (e) => { if (isTa(e.target)) ibusCommitPending = false; }, true);
-    document.addEventListener("input", (e) => {
-      if (!ibusCommitPending || !isTa(e.target)) return;
-      if (e.inputType !== "insertText" || e.isComposing || !e.data) return;
-      ibusCommitPending = false;
-      e.stopPropagation();                      // xterm 의 textarea input 핸들러(_inputEvent)에 안 닿게
-    }, true);
+  // ibus 는 음절 확정을 compositionend(data="") + 별도 input(insertText) 로 보낸다(Windows IME·Android 는
+  // compositionend 에 글자가 실려 온다). xterm 은 이 조합을 두 경로(input 핸들러 _inputEvent, 조합 종료 타이머
+  // _finalizeComposition)로 받아 같은 음절을 두 번 보낼 때가 있다 — 손을 빨리 뗀 음절만, 그래서 간헐적.
+  // 경로를 하나씩 막는 건 끝이 없어서(첫 시도에서 다른 경로가 또 겹쳤다) 출구에서 거른다:
+  // 한글 음절 하나가 직전 전송과 같고, 그 사이에 keydown 이 없고, 100ms 안이면 두 번째를 버린다.
+  // 같은 음절을 일부러 두 번 치려면 키를 다시 눌러야 하므로 정상 타이핑은 걸리지 않는다.
+  const IBUS_DEDUPE = !isPhone && /Linux/.test(navigator.platform) && !/Android/.test(navigator.userAgent);
+  let ibusKeySeq = 0;
+  const ibusLast = { d: "", at: 0, seq: -1 };
+  if (IBUS_DEDUPE) document.addEventListener("keydown", () => { ibusKeySeq++; }, true);
+  function ibusDuplicate(d) {
+    if (!IBUS_DEDUPE || !/^[가-힣]$/.test(d)) return false;
+    const now = performance.now();
+    const dup = d === ibusLast.d && ibusKeySeq === ibusLast.seq && now - ibusLast.at < 100;
+    ibusLast.d = d; ibusLast.at = now; ibusLast.seq = ibusKeySeq;
+    return dup;
   }
   const IME_PROBE = /[?&]ime=1/.test(location.search);
   const imeCounts = { start: 0, update: 0, end: 0 };
@@ -1093,6 +1086,7 @@
     // `[?1;2c`. Drop those auto-replies, but only right after attaching.
     const AUTO_REPLY = /^\x1b\[\??[0-9;]*[cnR]$/;
     term.onData(d => {
+      if (ibusDuplicate(d)) return;
       if (AUTO_REPLY.test(d)) {
         if (performance.now() - p.attachedAt < 1500) return;
         // Only the size owner answers terminal queries (device attributes, cursor position).
