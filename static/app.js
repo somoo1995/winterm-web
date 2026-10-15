@@ -186,6 +186,31 @@
   // inspector is enough friction that the question just stays open.
   //
   // So it counts them and puts the number on the screen. Whoever is holding the phone reads it.
+  // ibus(리눅스 한글 입력기) + Chrome 에서 음절이 두 번 들어가는 문제 (2026-10-15, 젠북 Ubuntu 실측).
+  // ibus 는 음절을 확정할 때 compositionend(data="") 를 먼저 보내고, 확정된 글자를 별도의
+  // input(inputType="insertText") 이벤트로 넘긴다(Windows IME·Android 는 compositionend 에 글자가 실려 온다).
+  // xterm 은 그 insertText 를 "키 없이 들어온 텍스트"로 보고 바로 보내는데(_inputEvent, 직전에 keyup 이
+  // 먼저 도착한 경우만), compositionend 쪽 타이머도 textarea 차이로 같은 음절을 또 보낸다 → 손을 빨리
+  // 뗀 음절만 두 번 찍힌다. compositionend("") 직후의 insertText 는 xterm 에 안 보이게 막아 타이머 한 경로만 남긴다.
+  const IBUS_COMMIT_FIX = !isPhone && /Linux/.test(navigator.platform) && !/Android/.test(navigator.userAgent);
+  let ibusCommitPending = false;
+  let ibusCommitTimer = null;
+  if (IBUS_COMMIT_FIX) {
+    const isTa = (t) => !!(t && t.classList && t.classList.contains("xterm-helper-textarea"));
+    document.addEventListener("compositionend", (e) => {
+      if (!isTa(e.target) || e.data !== "") return;
+      ibusCommitPending = true;
+      clearTimeout(ibusCommitTimer);
+      ibusCommitTimer = setTimeout(() => { ibusCommitPending = false; }, 300);
+    }, true);
+    document.addEventListener("keydown", (e) => { if (isTa(e.target)) ibusCommitPending = false; }, true);
+    document.addEventListener("input", (e) => {
+      if (!ibusCommitPending || !isTa(e.target)) return;
+      if (e.inputType !== "insertText" || e.isComposing || !e.data) return;
+      ibusCommitPending = false;
+      e.stopPropagation();                      // xterm 의 textarea input 핸들러(_inputEvent)에 안 닿게
+    }, true);
+  }
   const IME_PROBE = /[?&]ime=1/.test(location.search);
   const imeCounts = { start: 0, update: 0, end: 0 };
   let imeBox = null;
