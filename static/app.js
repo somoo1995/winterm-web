@@ -191,17 +191,17 @@
   // compositionend 에 글자가 실려 온다). xterm 은 이 조합을 두 경로(input 핸들러 _inputEvent, 조합 종료 타이머
   // _finalizeComposition)로 받아 같은 음절을 두 번 보낼 때가 있다 — 손을 빨리 뗀 음절만, 그래서 간헐적.
   // 경로를 하나씩 막는 건 끝이 없어서(첫 시도에서 다른 경로가 또 겹쳤다) 출구에서 거른다:
-  // 한글 음절 하나가 직전 전송과 같고, 그 사이에 keydown 이 없고, 100ms 안이면 두 번째를 버린다.
-  // 같은 음절을 일부러 두 번 치려면 키를 다시 눌러야 하므로 정상 타이핑은 걸리지 않는다.
+  // 한글 음절 하나가 직전에 보낸 음절과 같고 80ms 안이면 두 번째를 버린다. "그 사이 keydown 없음" 조건은
+  // 두지 않는다 — 단어 끝에서는 두 번째 전송이 스페이스 keydown 에 의해 일어나므로("지금금 ") 그 조건이 깨진다.
+  // 음절 하나에 키 두 번 이상이 필요하니 같은 음절이 80ms 안에 두 번 나오는 건 사람 타이핑으론 불가능하고,
+  // 붙여넣기는 한 덩어리로 오므로 여기 걸리지 않는다.
   const IBUS_DEDUPE = !isPhone && /Linux/.test(navigator.platform) && !/Android/.test(navigator.userAgent);
-  let ibusKeySeq = 0;
-  const ibusLast = { d: "", at: 0, seq: -1 };
-  if (IBUS_DEDUPE) document.addEventListener("keydown", () => { ibusKeySeq++; }, true);
+  const ibusLast = { d: "", at: 0 };
   function ibusDuplicate(d) {
     if (!IBUS_DEDUPE || !/^[가-힣]$/.test(d)) return false;
     const now = performance.now();
-    const dup = d === ibusLast.d && ibusKeySeq === ibusLast.seq && now - ibusLast.at < 100;
-    ibusLast.d = d; ibusLast.at = now; ibusLast.seq = ibusKeySeq;
+    const dup = d === ibusLast.d && now - ibusLast.at < 80;
+    ibusLast.d = d; ibusLast.at = now;
     return dup;
   }
   const IME_PROBE = /[?&]ime=1/.test(location.search);
