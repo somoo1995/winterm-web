@@ -1960,10 +1960,18 @@
     if (r && r.session) focusPane(r.session.sid);
   }
 
-  async function newTab(cwd) {
-    const base = String(cwd).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "term";
+  // A tab name nobody uses yet: `base`, else `base_2`, `base_3`... `:` `/` `\` are dropped
+  // because the server refuses them in tab names (they collide with `tab:pane` and URL paths).
+  function freeTabName(base) {
+    base = String(base || "").replace(/[:\\/]/g, "").trim() || "term";
     let name = base, n = 1;
     while (tabNames().includes(name)) name = `${base}_${++n}`;
+    return name;
+  }
+  const folderName = (cwd) => String(cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+
+  async function newTab(cwd) {
+    const name = freeTabName(folderName(cwd));
     const r = await api.create({ name, cwd, cols: 120, rows: 30 });
     await refresh();
     if (r && r.session) { activeTab = name; activeSid = r.session.sid; renderTabs(); renderPanes(); }
@@ -2023,7 +2031,7 @@
     if (to === null) return;
 
     // (tab name, pane label) is a composite key, and unlike `label` the rename endpoint does NOT
-    // check it (server.py's api_rename sets the name and nothing else). Carrying a manual label
+    // check it (server.py's api_rename sets the name and the pane order, nothing else). Carrying a manual label
     // into a tab that already has one would therefore make `tab:label` ambiguous and every
     // name-based lookup - the API, the skill - would answer 409 instead of finding the pane.
     // Drop the label in that case: an automatic name is a smaller loss than an unaddressable pane.
@@ -2040,20 +2048,29 @@
   }
 
   // Ctrl+H - one picker for both directions: park this pane out of sight, or bring a parked one
-  // into the tab being looked at right now. Coming back to WHERE IT WAS is deliberately not
-  // offered: the original tab may be gone by then, and "bring it here" is the thing actually
-  // wanted after walking away from it.
+  // into the tab being looked at right now (it joins the END of that tab - the server keeps a
+  // pane order, see "Pane order" in server.py). Going back INTO the tab it came from is
+  // deliberately not offered: that tab may be gone by then, and "bring it here" is the thing
+  // actually wanted after walking away from it.
+  // The last row brings one back as a tab of its own, named after the tab it was hidden from
+  // (`prev`, from the server). Ctrl+N then Ctrl+H did the same in two steps but left the new
+  // tab's empty shell next to it.
   async function hidePane(sid) {
     const s = sessOf(sid);
     const hidden = hiddenPanes();
     const items = [];
+    const hiddenName = (h) => paneLabel(h.sid) || h.title || h.sid.slice(0, 8);
+    const hiddenSub = (h) => (h.prev && h.prev !== HIDDEN_TAB
+      ? tr("msg.hideHiddenFrom", { name: h.prev }) : tr("msg.hideHidden"));
     // Hiding the last visible pane would leave an empty screen with no tab to restore into.
     const canHide = !!s && tabNames().length > 0 && sessions.length - hidden.length > 1;
     if (canHide) items.push({ value: { op: "hide" }, label: tr("msg.hideThis"), sub: paneLabel(sid) || (s.title || "") });
     for (const h of hidden) {
-      items.push({ value: { op: "show", sid: h.sid },
-                   label: paneLabel(h.sid) || h.title || h.sid.slice(0, 8),
-                   sub: tr("msg.hideHidden") });
+      items.push({ value: { op: "show", sid: h.sid }, label: hiddenName(h), sub: hiddenSub(h) });
+    }
+    if (hidden.length) {
+      items.push({ value: { op: "newtab" }, label: tr("msg.hideNewTab"),
+                   sub: tr("msg.hideNewTabSub") });
     }
     if (!items.length) { flash(tr(s && !canHide ? "msg.hideLast" : "msg.hideNothing")); return; }
 
@@ -2064,6 +2081,24 @@
       await api.rename(sid, HIDDEN_TAB);
       await refresh(true);
       flash(tr("msg.hideDone", { n: hidden.length + 1 }));
+      return;
+    }
+    if (r.op === "newtab") {
+      // With one hidden pane there is nothing to choose.
+      const one = hidden.length === 1 ? hidden[0].sid : await pick(tr("msg.hideNewTabTitle"),
+        hidden.map((h) => ({ value: h.sid, label: hiddenName(h), sub: hiddenSub(h) })),
+        tr("msg.moveHint"));
+      if (one === null) return;
+      const h = sessOf(one);
+      const prev = h && h.prev !== HIDDEN_TAB ? h.prev : "";
+      const name = freeTabName(prev || folderName(h && h.cwd));
+      // A new tab has no labels yet, so the composite-key check below is not needed here.
+      const res = await api.rename(one, name);
+      if (res && res.ok === false) { alert(tr("msg.moveFailed")); return; }
+      activeTab = name;
+      activeSid = one;
+      await refresh(true);
+      flash(tr("msg.hideBackNew", { name }));
       return;
     }
     // Bringing one back is a move into the current tab, so it carries the same composite-key

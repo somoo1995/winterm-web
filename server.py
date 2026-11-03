@@ -533,8 +533,7 @@ async def api_offer(payload: dict = Body(...)):
 
     src = None
     if payload.get("target"):
-        r = await _ask({"op": "list"})
-        s, _ = _match(r.get("sessions", []), str(payload["target"]))
+        s, _ = _match(await _sessions(), str(payload["target"]))
         if s:
             src = f"{s['name']}:{s['label']}" if s.get("label") else s["name"]
 
@@ -785,9 +784,89 @@ async def api_health():
         return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=503)
 
 
+# -- Pane order --------------------------------------------------------------
+# Tab order and pane order are both LIST order: the tab bar draws each name where it first
+# appears, and `_match()` counts "3-2" by the same rule. The daemon lists sessions by creation
+# time, and moving a pane (Ctrl+M, Ctrl+H hide / bring back) only changes its name. So a pane
+# brought back took its CREATION slot - it cut in ahead of the panes already in the tab, and when
+# it was older than all of them the whole tab jumped to that slot in the tab bar, shifting the
+# numbers under Ctrl+1..9 and under "3-2" (2026-11-03: Ctrl+N, then Ctrl+H).
+#
+# Fix: an order value per pane, kept here rather than in the daemon (restarting the daemon closes
+# every shell; this server restarts freely). A pane that never moved sorts by `created`, exactly
+# as before.
+#   - the moved pane gets "now" -> it joins the END of the target tab, and a brand-new tab name
+#     lands last in the tab bar
+#   - if it was the first pane of the tab it left, the next pane inherits its value, so that tab
+#     keeps its place
+# Sorting happens in ONE place, `_sessions()`, and every reader of the list (the browser,
+# `_match`, /api/tabs, `_pos_of`) goes through it - the screen number and the address number
+# cannot drift apart.
+# `prev` = the tab a pane was last moved out of; Ctrl+H "bring back as a new tab" reuses it.
+PANE_STATE_PATH = os.path.join(config.BASE, "pane_state.json")   # .gitignored - local state
+
+
+def _pane_state_load():
+    try:
+        with open(PANE_STATE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _pane_state_save():
+    # Atomic, like offers.json: a half-written file would reorder every tab on the next start.
+    tmp = PANE_STATE_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_pane_state, fh, ensure_ascii=False)
+        os.replace(tmp, PANE_STATE_PATH)
+    except OSError as e:
+        log.info("pane_state.json write failed: %s", e)
+
+
+_pane_state = _pane_state_load()     # {sid: {"order": float, "prev": tab name}}
+
+
+def _order_of(s):
+    v = (_pane_state.get(s.get("sid")) or {}).get("order")
+    return v if isinstance(v, (int, float)) else (s.get("created") or 0)
+
+
+def _ordered(sessions):
+    """The daemon's list in pane order, with `prev` attached. Forgets panes that no longer exist."""
+    live = {s.get("sid") for s in sessions}
+    gone = [k for k in _pane_state if k not in live]
+    for k in gone:
+        del _pane_state[k]
+    if gone:
+        _pane_state_save()
+    out = sorted(sessions, key=_order_of)      # stable: equal values keep the daemon's order
+    for s in out:
+        prev = (_pane_state.get(s.get("sid")) or {}).get("prev")
+        if prev:
+            s["prev"] = prev
+    return out
+
+
+def _note_move(sessions, me, to):
+    """Record that pane `me` left its tab for `to` (`sessions` is the ordered list before the move)."""
+    old = me["name"]
+    rest = [s for s in sessions if s["name"] == old and s["sid"] != me["sid"]]
+    mine = _order_of(me)
+    if rest and _order_of(rest[0]) > mine:     # it was the first pane there: hand its place on
+        _pane_state.setdefault(rest[0]["sid"], {})["order"] = mine
+    _pane_state[me["sid"]] = {"order": time.time(), "prev": old}
+    _pane_state_save()
+
+
 @app.get("/api/sessions")
 async def api_list():
     r = await _ask({"op": "list"})
+    r["sessions"] = _ordered(r.get("sessions") or [])
     # A session served through a Hub is ONE client to the daemon - this server - so the browser
     # count has to come from here. app.js takes ownership when `clients <= 1` ("alone"); the
     # daemon's constant 1 would make every observer grab the size from whoever is working.
@@ -822,8 +901,16 @@ async def api_kill(sid: str):
 
 @app.post("/api/sessions/{sid}/rename")
 async def api_rename(sid: str, payload: dict = Body(...)):
-    r = await _ask({"op": "rename", "sid": sid, "name": payload.get("name", "")})
-    return {"ok": r.get("renamed", False)}
+    """Move ONE pane into another tab (a tab is just the shared name). Renaming a whole tab is
+    /api/tabs/{name}/rename, which keeps every pane's order and therefore the tab's place."""
+    name = payload.get("name", "")
+    ss = await _sessions()
+    me = next((s for s in ss if s["sid"] == sid), None)
+    r = await _ask({"op": "rename", "sid": sid, "name": name})
+    ok = r.get("renamed", False)
+    if ok and me and me["name"] != name:
+        _note_move(ss, me, name)
+    return {"ok": ok}
 
 
 @app.post("/api/sessions/{sid}/label")
@@ -940,8 +1027,7 @@ def _match(sessions, target):
 
 async def _resolve(target):
     """target -> session. On miss, returns a JSONResponse with 404; on ambiguity, one with 409."""
-    r = await _ask({"op": "list"})
-    s, cands = _match(r.get("sessions", []), target)
+    s, cands = _match(await _sessions(), target)
     if s:
         return s, None
     if cands:
@@ -972,7 +1058,8 @@ def _bad_tab_name(name):
 
 
 async def _sessions():
-    return (await _ask({"op": "list"})).get("sessions", [])
+    """The session list in pane order - every reader goes through here (see "Pane order")."""
+    return _ordered((await _ask({"op": "list"})).get("sessions", []))
 
 
 def _tab_panes(sessions, name):
