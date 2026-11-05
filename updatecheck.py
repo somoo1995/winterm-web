@@ -161,16 +161,48 @@ def restart_daemon():
     return True, "restarting daemon and server"
 
 
+def _systemd_unit():
+    """`(scope, unit)` when this process runs as a systemd service, else None.
+
+    systemd sets INVOCATION_ID for every unit it starts; the unit name, and whether it belongs to a
+    per-user manager (`user@UID.service` in the path), come from this process's cgroup."""
+    if not os.environ.get("INVOCATION_ID"):
+        return None
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    # cgroup v2 is the one "0::" line; under v1 the systemd hierarchy is "N:name=systemd:".
+    path = next((ln.split(":", 2)[2] for ln in lines
+                 if ln.startswith("0::") or ":name=systemd:" in ln), "")
+    parts = path.split("/")
+    unit = next((p for p in reversed(parts) if p.endswith(".service")), None)
+    if not unit:
+        return None
+    return ("--user" if any(p.startswith("user@") for p in parts) else "--system"), unit
+
+
 def restart_server():
-    """Ask the launcher to restart the web server (sessions live in the daemon and survive)."""
+    """Ask the launcher - or, on Linux, systemd - to restart the web server (sessions live in the
+    daemon and survive)."""
     exe = os.path.join(BASE, "webterm.exe")
     if sys.platform.startswith("win") and os.path.exists(exe):
         cmd = [exe, "--restart", "--no-browser"]
+    elif (su := _systemd_unit()) and su[0] == "--user":
+        # Without this, a systemd-run server answered "no launcher here" and the browser's
+        # Restart button could never work there (2026-11-05). `--no-block` only queues the job;
+        # the 1s wait lets this answer reach the browser before systemd stops the process.
+        cmd = ["sh", "-c", f"sleep 1; exec systemctl --user --no-block restart '{su[1]}'"]
+    elif su:
+        # A system unit needs root, and a detached systemctl would fail where nobody sees it.
+        return False, f"run as root: systemctl restart {su[1]}"
     else:
         return False, "no launcher here; restart server.py by hand"
     try:
         subprocess.Popen(cmd, cwd=BASE, creationflags=_SPAWN_FLAGS, close_fds=True,
+                         start_new_session=not sys.platform.startswith("win"),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        return False, f"could not start the launcher: {e}"
+        return False, f"could not start the restart: {e}"
     return True, "restarting"

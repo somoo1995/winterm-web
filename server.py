@@ -745,7 +745,8 @@ async def api_update_check():
 
 @app.post("/api/restart-server")
 async def api_restart_server():
-    """Restart the web server through the launcher. The daemon - and every shell - stays up.
+    """Restart the web server through the launcher (Windows) or systemd (a Linux `--user` unit).
+    The daemon - and every shell - stays up.
 
     This used to be a "How?" alert with a command to type, on the reasoning that a page cannot
     restart a process it does not own. It can ask the launcher to, which is what the command in
