@@ -1308,6 +1308,61 @@ async def api_capture(sid: str):
     return {"ok": True, "text": r.get("text", "")}
 
 
+# -- Which device is on a pane -----------------------------------------------
+# A program running in a pane (a Claude hook, say) cannot see the browser, only its own pane id.
+# So the server keeps, per browser (cid), the device NAME the user gave that browser in Settings
+# (localStorage, sent as `dev` in the WS query), plus a rough OS guess from the User-Agent for
+# browsers nobody named. Deliberately not derived from the network: webterm runs behind Tailscale
+# here, an SSH tunnel or a plain LAN elsewhere, and none of them should be required.
+_client_dev = {}            # {cid: {"dev": name, "os": guess}}
+_last_enter = {}            # {sid: (cid, epoch)} - the browser that last pressed Enter in the pane
+
+
+def _clean_dev(v):
+    return "".join(ch for ch in str(v or "") if ch.isprintable()).strip()[:40]
+
+
+def _os_guess(ua):
+    ua = ua or ""
+    # Android before Linux (its UA says both), iPad before macOS (iPadOS can claim to be a Mac).
+    for key, name in (("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iOS"),
+                      ("Windows", "Windows"), ("CrOS", "ChromeOS"), ("Mac OS X", "macOS"),
+                      ("Linux", "Linux")):
+        if key in ua:
+            return name
+    return "?"
+
+
+def _note_client(ws, cid):
+    _client_dev[cid] = {"dev": _clean_dev(ws.query_params.get("dev")),
+                        "os": _os_guess(ws.headers.get("user-agent"))}
+
+
+def _note_input(sid, cid, d):
+    # Enter, not any byte: focus reports and late terminal replies are input too, but only a person
+    # submits a line. Text sent by POST /api/send never comes through a socket, so it never counts.
+    if isinstance(d, str) and "\r" in d:
+        _last_enter[sid] = (cid, time.time())
+
+
+@app.get("/api/sessions/{sid}/viewers")
+async def api_viewers(sid: str):
+    """`{attached: [{cid, dev, os}], lastEnter: {cid, dev, os, ago} | null}` - the browsers on this
+    pane, and the one that last pressed Enter in it with how many seconds ago. `dev` is "" for a
+    browser nobody named. Held in memory only, so it starts empty after a web-server restart."""
+    def who(cid):
+        d = _client_dev.get(cid) or {}
+        return {"cid": cid, "dev": d.get("dev", ""), "os": d.get("os", "?")}
+    cids = []
+    for w in list(_ws_by_sid.get(sid) or ()):
+        c = w.query_params.get("cid")
+        if c and c not in cids:
+            cids.append(c)
+    last = _last_enter.get(sid)
+    return {"ok": True, "sid": sid, "attached": [who(c) for c in cids],
+            "lastEnter": {**who(last[0]), "ago": round(time.time() - last[1], 1)} if last else None}
+
+
 # -- Multi-client screen sizing --------------------------------------------
 # The PTY has one size but several devices attach (PC 1600px + phone 412px).
 # Left alone, it keeps getting TAKEN OVER by whoever asked last, so the PC screen shrinks to phone
@@ -1475,6 +1530,7 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
     # cleanup, since the same browser can briefly overlap two while reconnecting.
     cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
     client_id = (cid, id(ws))
+    _note_client(ws, cid)
     try:
         # The daemon's model when it keeps one (DaemonView), else this server's (Hub).
         hub = await mirror.open_view(sid)
@@ -1546,7 +1602,11 @@ async def _ws_term_mirror(ws: WebSocket, sid: str):
                 continue
             t = msg.get("t")
             if t == "i":
-                await hub.input(msg.get("d", ""))
+                d = msg.get("d", "")
+                _note_input(sid, cid, d)
+                await hub.input(d)
+            elif t == "dev":                  # renamed in Settings - no reconnect needed
+                _client_dev.setdefault(cid, {"os": "?"})["dev"] = _clean_dev(msg.get("d"))
             elif t == "r":
                 size = (int(msg.get("c", 120)), int(msg.get("r", 30)))
                 _client_sizes.setdefault(sid, {})[client_id] = size
@@ -1610,6 +1670,7 @@ async def _ws_term_replay(ws: WebSocket, sid: str):
     # cleanup, since the same browser can briefly overlap two while reconnecting.
     cid = ws.query_params.get("cid") or f"anon-{id(ws)}"
     client_id = (cid, id(ws))
+    _note_client(ws, cid)
     try:
         info = await att.open()
     except Exception as e:
@@ -1681,7 +1742,11 @@ async def _ws_term_replay(ws: WebSocket, sid: str):
                 continue
             t = msg.get("t")
             if t == "i":
-                await att.input(msg.get("d", ""))
+                d = msg.get("d", "")
+                _note_input(sid, cid, d)
+                await att.input(d)
+            elif t == "dev":                  # renamed in Settings - no reconnect needed
+                _client_dev.setdefault(cid, {"os": "?"})["dev"] = _clean_dev(msg.get("d"))
             elif t == "r":
                 size = (int(msg.get("c", 120)), int(msg.get("r", 30)))
                 _client_sizes.setdefault(sid, {})[client_id] = size

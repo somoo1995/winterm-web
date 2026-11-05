@@ -119,6 +119,10 @@
     if (!v) { v = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("webterm.cid", v); }
     return v;
   })();
+  // This browser's device name ("phone", "laptop"), set in Settings > General. Kept in localStorage,
+  // not config.json: everything else there is shared by all devices, this must differ per device.
+  // Sent with the WS so the server can say which device typed into a pane (/api/sessions/{sid}/viewers).
+  let DEV = localStorage.getItem("webterm.dev") || "";
   // Restore the pin on phones only. A PC is the size owner by default, and a pinned PC
   // would both block the phone from taking over and stall the polling sync below,
   // leaving a permanent cell-count mismatch (the cause of overprinted screens).
@@ -1213,7 +1217,7 @@
     // turns off or the app is switched (that is the detach/attach churn in the log), and
     // losing ownership each time would snap the size back to the PC's.
     // `remote` lets the server tell an offering caller whether a phone is there to get the card.
-    const ws = new WebSocket(`${proto}://${location.host}/ws/${p.sid}?cid=${encodeURIComponent(CID)}&remote=${isRemote ? 1 : 0}`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws/${p.sid}?cid=${encodeURIComponent(CID)}&remote=${isRemote ? 1 : 0}&dev=${encodeURIComponent(DEV)}`);
     // Text frames are terminal output, verbatim. Control messages from the server (the PTY
     // size) come as BINARY frames so they can never be confused with something a shell printed.
     ws.binaryType = "arraybuffer";
@@ -2787,6 +2791,7 @@
       return { chord, id: p.id, arg: p.arg };
     });
     $("#st-font").value = fontSize;
+    $("#st-dev").value = DEV;
     $("#st-family").value = (cfg && cfg.fontFamily) || "";
     $("#st-cwd").value = (cfg && cfg.defaultCwd) || "";
     stLoadShells(cfg);
@@ -3028,6 +3033,14 @@
     // existing "deliberately unbound" value, which the server then filters out of the keymap.
     for (const chord of Object.keys(stDefaults)) {
       if (!(chord in keymap)) keymap[chord] = "";
+    }
+    // The device name is this browser's own, so it is stored here and never posted with the rest.
+    // Open panes are told at once; panes opened later carry it in their WS query.
+    const dev = $("#st-dev").value.trim().slice(0, 40);
+    if (dev !== DEV) {
+      DEV = dev;
+      if (dev) localStorage.setItem("webterm.dev", dev); else localStorage.removeItem("webterm.dev");
+      for (const p of panes.values()) wsend(p, { t: "dev", d: dev });
     }
     stMsg(tr("st.saving"));
     try {
