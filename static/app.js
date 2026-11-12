@@ -134,7 +134,7 @@
   // "last one looking wins" plus the `forced` pin.
   // `?observe=1` = observe only: reports no size, so attaching a second browser for
   // debugging cannot shrink the screen the user is actually looking at.
-  const APP_VER = 138;   // Bump together with index.html's ?v= on every static-file change.
+  const APP_VER = 139;   // Bump together with index.html's ?v= on every static-file change.
   const OBSERVE = /[?&]observe=1/.test(location.search);
   // Merely attaching must not steal the size. Opening a second browser used to
   // squeeze the user's screen down to that window's size via "whoever is looking owns
@@ -2757,6 +2757,89 @@
   $("#st-upd-go").onclick = () => stAction("/api/update");
   $("#st-upd-daemon").onclick = () => stAction("/api/restart-daemon");
 
+  // ---------- settings > notifications (Web Push, this browser only) ----------
+  // Each browser subscribes on its own; the server keeps one entry per subscription (push.py).
+  // State lives in the browser (its PushSubscription) - the server list only mirrors it, so the
+  // subscription is re-posted on every open (idempotent; also carries a renamed device name).
+  const pushBytes = (b64u) => {
+    const s = atob((b64u + "===".slice((b64u.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+    return Uint8Array.from(s, (c) => c.charCodeAt(0));
+  };
+  async function pushReg() {
+    let reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) reg = await navigator.serviceWorker.register("/sw.js");
+    return navigator.serviceWorker.ready.then(() => reg);
+  }
+  const pushPost = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                  body: JSON.stringify(body) }).then((r) => r.json());
+  async function stLoadPush(msg) {
+    const box = $("#st-push-text");
+    const btn = { on: $("#st-push-on"), test: $("#st-push-test"), off: $("#st-push-off") };
+    const show = (text, on, warn) => {
+      box.textContent = text;
+      box.classList.toggle("warn", !!warn);
+      btn.on.hidden = on !== false;
+      btn.test.hidden = btn.off.hidden = on !== true;
+    };
+    // Push needs a secure context (HTTPS, or localhost) and a browser that has it at all.
+    if (!window.isSecureContext || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+      return show(tr("st.push.unsupported"), null, true);
+    }
+    let info = null;
+    try { info = await fetch("/api/push").then((r) => r.json()); } catch (_) {}
+    if (!info || !info.ok) return show(tr("st.loadFailed"), null, true);
+    if (!info.available) return show(tr("st.push.serverOff", { err: info.error || "-" }), null, true);
+    if (Notification.permission === "denied") return show(tr("st.push.denied"), null, true);
+    let sub = null;
+    try { sub = await (await pushReg()).pushManager.getSubscription(); } catch (_) {}
+    let devs = info.devices || [];
+    if (sub && Notification.permission === "granted") {
+      try { await pushPost("/api/push/subscribe", { sub: sub.toJSON(), dev: DEV, cid: CID }); } catch (_) {}
+      try { devs = (await fetch("/api/push").then((r) => r.json())).devices || devs; } catch (_) {}
+    }
+    const names = devs.map((d) => d.dev || "?").join(", ") || "-";
+    const on = !!sub && Notification.permission === "granted";
+    show((msg ? msg + "\n" : "") + tr(on ? "st.push.isOn" : "st.push.isOff", { devs: names }), on);
+  }
+  async function pushOn() {
+    try {
+      if ((await Notification.requestPermission()) !== "granted") return stLoadPush();
+      const info = await fetch("/api/push").then((r) => r.json());
+      const reg = await pushReg();
+      const opts = { userVisibleOnly: true, applicationServerKey: pushBytes(info.key) };
+      let sub;
+      try { sub = await reg.pushManager.subscribe(opts); }
+      catch (e) {
+        // An old subscription made with another server key (push-vapid.pem was replaced): drop it.
+        const old = await reg.pushManager.getSubscription();
+        if (!old) throw e;
+        await old.unsubscribe();
+        sub = await reg.pushManager.subscribe(opts);
+      }
+      const r = await pushPost("/api/push/subscribe", { sub: sub.toJSON(), dev: DEV, cid: CID });
+      if (!r.ok) throw new Error(r.error || "subscribe failed");
+      stLoadPush();
+    } catch (e) { stMsg(String(e && e.message || e), "err"); stLoadPush(); }
+  }
+  async function pushOff() {
+    try {
+      const sub = await (await pushReg()).pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+      await pushPost("/api/push/unsubscribe", { endpoint: sub ? sub.endpoint : "", cid: CID });
+    } catch (e) { stMsg(String(e && e.message || e), "err"); }
+    stLoadPush();
+  }
+  async function pushTest() {
+    let r = null;
+    try { r = await pushPost("/api/push/send", { cid: CID, sid: activeSid || "",
+                                                  title: tr("st.push.testTitle"), body: tr("st.push.testBody") }); } catch (_) {}
+    if (!r || !r.ok) return stMsg((r && r.error) || tr("stale.failed"), "err");
+    stLoadPush(tr(r.sent ? "st.push.testSent" : "st.push.testNone"));
+  }
+  $("#st-push-on").onclick = pushOn;
+  $("#st-push-off").onclick = pushOff;
+  $("#st-push-test").onclick = pushTest;
+
   // ---------- settings panel ----------
   // Settings are saved on the SERVER (config.json), not in this browser, so a shortcut rebound
   // on the phone reaches the PC. `security` is not editable here - see config.py's allowlist.
@@ -2940,6 +3023,7 @@
       stRender();
       stMsg("");
       stLoadUpdate(false);           // cached answer; "Check now" asks GitHub
+      stLoadPush();
       $("#settings").hidden = false;
       // Without this the terminal keeps focus and typing goes into the shell behind the panel.
       // Skipped on phones, where focusing a text field pops the soft keyboard over the list.
@@ -3846,11 +3930,32 @@
     $("#clock").textContent = `${z(d.getMonth() + 1)}/${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`;
   }, 1000);
 
+  // A tapped notification names its pane (sw.js): `/?sid=` when it opened this window, a
+  // message when it reused an open one.
+  async function gotoSid(sid) {
+    let s = sessions.find((x) => x.sid === sid);
+    if (!s) { await refresh(true); s = sessions.find((x) => x.sid === sid); }
+    if (s) goPane(s.name, sid);
+  }
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      if (e.data && e.data.t === "goto" && e.data.sid) gotoSid(e.data.sid);
+    });
+  }
+
   // ---------- boot ----------
   (async () => {
     await loadConfig();          // keymap, default cwd, font
     await refresh();
+    const want = new URLSearchParams(location.search).get("sid");
+    if (want) {
+      // Drop it from the address, or every later reload would jump back to that pane.
+      const u = new URL(location.href);
+      u.searchParams.delete("sid");
+      history.replaceState(history.state, "", u.pathname + u.search + u.hash);
+    }
     if (!sessions.length) await newTab(DEFAULT_CWD);
+    else if (want && sessions.some((x) => x.sid === want)) gotoSid(want);
     else focusPane(activeSid);
   })();
 })();

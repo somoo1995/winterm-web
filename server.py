@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 import config
 import daemon_client as dc
 import mirror
+import push
 import screen_model
 import pty_backend
 import updatecheck
@@ -275,6 +276,75 @@ async def manifest():
 @app.get("/sw.js")
 async def service_worker():
     return FileResponse(os.path.join(STATIC, "sw.js"), media_type="application/javascript")
+
+
+# -- Web Push (a pane needs you -> the phone's lock screen) -------------------
+# The sender is usually a claude hook running INSIDE a pane: it knows its own WEBTERM_SID, posts
+# `{title, body, sid}`, and the server adds where it came from ("5-4 kinetic/w-infer") plus the
+# pane's own title, and makes the tap open that pane. See push.py.
+_TITLE_FRAME = re.compile(r"^[^\w\s]\s+")      # claude's "<spinner> <summary>" title prefix
+
+
+def _push_off(e):
+    return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=503)
+
+
+@app.get("/api/push")
+async def api_push_info():
+    """For the settings panel: is push usable here, the key to subscribe with, who is subscribed."""
+    try:
+        key = await asyncio.to_thread(push.public_key)
+    except push.Unavailable as e:
+        return {"ok": True, "available": False, "error": str(e), "devices": []}
+    return {"ok": True, "available": True, "key": key, "devices": push.devices()}
+
+
+@app.post("/api/push/subscribe")
+async def api_push_subscribe(payload: dict = Body(...)):
+    """`{sub, dev?, cid?}` - sub is PushSubscription.toJSON(). Idempotent: the browser re-posts it
+    every time the settings panel opens, which also carries a renamed device name."""
+    sub = payload.get("sub")
+    if not isinstance(sub, dict):
+        return UTF8JSONResponse({"ok": False, "error": "sub is required"}, status_code=400)
+    try:
+        n = push.subscribe(sub, str(payload.get("dev") or ""), str(payload.get("cid") or ""))
+    except ValueError as e:
+        return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "devices": n}
+
+
+@app.post("/api/push/unsubscribe")
+async def api_push_unsubscribe(payload: dict = Body(...)):
+    n = push.unsubscribe(str(payload.get("endpoint") or ""), str(payload.get("cid") or ""))
+    return {"ok": True, "removed": n}
+
+
+@app.post("/api/push/send")
+async def api_push_send(payload: dict = Body(...)):
+    """`{title, body?, sid?, tag?, cid?}` -> sent to every subscribed browser (or only `cid`).
+
+    With a live `sid`: the body gets a "where" line, the tag is per pane (a newer alert from the
+    same pane replaces the older one instead of stacking), and tapping opens that pane."""
+    try:
+        title = _as_text(payload.get("title") or "webterm")[:120]
+        body = _as_text(payload.get("body") or "")[:400]
+    except ValueError as e:
+        return UTF8JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    url, tag, sid = "/", str(payload.get("tag") or "webterm"), str(payload.get("sid") or "")
+    s = next((x for x in await _sessions() if x["sid"] == sid), None) if sid else None
+    if s:
+        where = " ".join(x for x in (await _pos_of(sid),
+                                     "/".join(x for x in (s["name"], s.get("label")) if x)) if x)
+        task = _TITLE_FRAME.sub("", (s.get("title") or "").strip())
+        body = "\n".join(x for x in (body, f"{where} · {task}" if task else where) if x)
+        url, tag = f"/?sid={sid}", f"pane-{sid}"
+    try:
+        sent, removed = await asyncio.to_thread(push.send, title, body, url, tag,
+                                                str(payload.get("cid") or ""))
+    except push.Unavailable as e:
+        return _push_off(e)
+    log.info("push %r sid=%s -> sent=%d removed=%d", title, sid or "-", sent, removed)
+    return {"ok": True, "sent": sent, "removed": removed}
 
 
 @app.get("/api/clipboard")

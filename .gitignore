@@ -36,3 +36,8 @@ docs/
 
 # Dev test page (not needed to run it)
 static/scrolltest.html
+
+# -- Web Push: the VAPID private key and the subscribed browsers (push.py; never commit) --
+push-vapid.pem
+push-subs.json
+push-subs.json.tmp
